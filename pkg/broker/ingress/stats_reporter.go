@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -55,14 +55,16 @@ var (
 	// - length between 1 and 255 inclusive
 	// - characters are printable US-ASCII
 	eventTypeKey         = tag.MustNewKey(eventingmetrics.LabelEventType)
+	eventSchemeKey       = tag.MustNewKey(eventingmetrics.LabelEventScheme)
 	responseCodeKey      = tag.MustNewKey(eventingmetrics.LabelResponseCode)
 	responseCodeClassKey = tag.MustNewKey(eventingmetrics.LabelResponseCodeClass)
 )
 
 type ReportArgs struct {
-	ns        string
-	broker    string
-	eventType string
+	ns          string
+	broker      string
+	eventType   string
+	eventScheme string
 }
 
 func init() {
@@ -75,8 +77,10 @@ type StatsReporter interface {
 	ReportEventDispatchTime(args *ReportArgs, responseCode int, d time.Duration) error
 }
 
-var _ StatsReporter = (*reporter)(nil)
-var emptyContext = context.Background()
+var (
+	_            StatsReporter = (*reporter)(nil)
+	emptyContext               = context.Background()
+)
 
 // Reporter holds cached metric objects to report ingress metrics.
 type reporter struct {
@@ -95,10 +99,12 @@ func NewStatsReporter(container, uniqueName string) StatsReporter {
 func register() {
 	tagKeys := []tag.Key{
 		eventTypeKey,
+		eventSchemeKey,
 		responseCodeKey,
 		responseCodeClassKey,
 		broker.ContainerTagKey,
-		broker.UniqueTagKey}
+		broker.UniqueTagKey,
+	}
 
 	// Create view to see our measurements.
 	err := metrics.RegisterResourceView(
@@ -154,6 +160,7 @@ func (r *reporter) generateTag(args *ReportArgs, responseCode int) (context.Cont
 		tag.Insert(broker.ContainerTagKey, r.container),
 		tag.Insert(broker.UniqueTagKey, r.uniqueName),
 		tag.Insert(eventTypeKey, args.eventType),
+		tag.Insert(eventSchemeKey, args.eventScheme),
 		tag.Insert(responseCodeKey, strconv.Itoa(responseCode)),
 		tag.Insert(responseCodeClassKey, metrics.ResponseCodeClass(responseCode)))
 }

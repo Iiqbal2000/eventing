@@ -8,7 +8,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,6 @@ package rekt
 
 import (
 	"testing"
-	"time"
 
 	"knative.dev/pkg/system"
 	"knative.dev/reconciler-test/pkg/environment"
@@ -60,7 +59,8 @@ func TestPingSourceTLS(t *testing.T) {
 	)
 	t.Cleanup(env.Finish)
 
-	env.Test(ctx, t, pingsource.SendsEventsTLS())
+	env.ParallelTest(ctx, t, pingsource.SendsEventsTLS())
+	env.ParallelTest(ctx, t, pingsource.SendsEventsTLSTrustBundle())
 }
 
 func TestPingSourceWithSinkURI(t *testing.T) {
@@ -91,7 +91,7 @@ func TestPingSourceWithCloudEventData(t *testing.T) {
 	env.Test(ctx, t, pingsource.SendsEventsWithCloudEventData())
 }
 
-func TestPingSourceWithEventTypes(t *testing.T) {
+func TestPingSourceWithSecondsInSchedule(t *testing.T) {
 	t.Parallel()
 
 	ctx, env := global.Environment(
@@ -100,8 +100,37 @@ func TestPingSourceWithEventTypes(t *testing.T) {
 		knative.WithTracingConfig,
 		k8s.WithEventListener,
 		environment.Managed(t),
-		environment.WithPollTimings(5*time.Second, 2*time.Minute),
 	)
 
-	env.Test(ctx, t, pingsource.SendsEventsWithEventTypes())
+	env.Test(ctx, t, pingsource.SendsEventsWithSecondsInSchedule())
+}
+
+func TestPingSourceDataPlane_BrokerAsSinkTLS(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		eventshub.WithTLS(t),
+	)
+
+	env.Test(ctx, t, pingsource.SendsEventsWithBrokerAsSinkTLS())
+}
+
+func TestPingSourceSendsEventsOIDC(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		eventshub.WithTLS(t),
+	)
+
+	env.Test(ctx, t, pingsource.PingSourceSendEventOIDC())
 }

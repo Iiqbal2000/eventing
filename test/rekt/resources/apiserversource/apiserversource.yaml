@@ -83,4 +83,11 @@ spec:
     {{ if .sink.uri }}
     uri: {{ .sink.uri }}
     {{ end }}
+    {{ if .sink.audience }}
+    audience: {{ .sink.audience }}
+    {{ end }}
+  {{ end }}
+  {{ if .filters }}
+  filters:
+{{ .filters }}
   {{ end }}

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,12 @@ import (
 	"fmt"
 	nethttp "net/http"
 	"time"
+
+	duckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+
+	"knative.dev/eventing/pkg/apis/feature"
+
+	"knative.dev/eventing/pkg/auth"
 
 	"github.com/cloudevents/sdk-go/v2/event"
 	"github.com/cloudevents/sdk-go/v2/protocol/http"
@@ -65,6 +71,10 @@ type EventReceiver struct {
 	hostToChannelFunc    ResolveChannelFromHostFunc
 	pathToChannelFunc    ResolveChannelFromPathFunc
 	reporter             StatsReporter
+	tokenVerifier        *auth.Verifier
+	audience             string
+	getPoliciesForFunc   GetPoliciesForFunc
+	withContext          func(context.Context) context.Context
 }
 
 // EventReceiverFunc is the function to be called for handling the event.
@@ -96,6 +106,31 @@ type ResolveChannelFromPathFunc func(string) (ChannelReference, error)
 func ResolveChannelFromPath(PathToChannelFunc ResolveChannelFromPathFunc) EventReceiverOptions {
 	return func(r *EventReceiver) error {
 		r.pathToChannelFunc = PathToChannelFunc
+		return nil
+	}
+}
+
+// GetPoliciesForFunc function enables the EventReceiver to get the Channels AppliedEventPoliciesStatus
+type GetPoliciesForFunc func(channel ChannelReference) ([]duckv1.AppliedEventPolicyRef, error)
+
+func ReceiverWithGetPoliciesForFunc(fn GetPoliciesForFunc) EventReceiverOptions {
+	return func(r *EventReceiver) error {
+		r.getPoliciesForFunc = fn
+		return nil
+	}
+}
+
+func OIDCTokenVerification(tokenVerifier *auth.Verifier, audience string) EventReceiverOptions {
+	return func(r *EventReceiver) error {
+		r.tokenVerifier = tokenVerifier
+		r.audience = audience
+		return nil
+	}
+}
+
+func ReceiverWithContextFunc(fn func(context.Context) context.Context) EventReceiverOptions {
+	return func(r *EventReceiver) error {
+		r.withContext = fn
 		return nil
 	}
 }
@@ -153,6 +188,12 @@ func (r *EventReceiver) Start(ctx context.Context) error {
 }
 
 func (r *EventReceiver) ServeHTTP(response nethttp.ResponseWriter, request *nethttp.Request) {
+	ctx := request.Context()
+
+	if r.withContext != nil {
+		ctx = r.withContext(ctx)
+	}
+
 	response.Header().Set("Allow", "POST, OPTIONS")
 	if request.Method == nethttp.MethodOptions {
 		response.Header().Set("WebHook-Allowed-Origin", "*") // Accept from any Origin:
@@ -203,6 +244,12 @@ func (r *EventReceiver) ServeHTTP(response nethttp.ResponseWriter, request *neth
 
 	args.Ns = channel.Namespace
 
+	if request.TLS != nil {
+		args.EventScheme = "https"
+	} else {
+		args.EventScheme = "http"
+	}
+
 	event, err := http.NewEventFromHTTPRequest(request)
 	if err != nil {
 		r.logger.Warn("failed to extract event from request", zap.Error(err))
@@ -216,6 +263,32 @@ func (r *EventReceiver) ServeHTTP(response nethttp.ResponseWriter, request *neth
 		r.logger.Warn("failed to validate extracted event", zap.Error(err))
 		response.WriteHeader(nethttp.StatusBadRequest)
 		return
+	}
+
+	/// Here we do the OIDC audience verification
+	features := feature.FromContext(ctx)
+	if features.IsOIDCAuthentication() {
+		r.logger.Debug("OIDC authentication is enabled")
+
+		if r.getPoliciesForFunc == nil {
+			r.logger.Error("getPoliciesForFunc() callback not set. Can't get applying event policies of channel")
+			response.WriteHeader(nethttp.StatusInternalServerError)
+			return
+		}
+
+		applyingEventPolicies, err := r.getPoliciesForFunc(channel)
+		if err != nil {
+			r.logger.Error("could not get applying event policies of channel", zap.Error(err), zap.String("channel", channel.String()))
+			response.WriteHeader(nethttp.StatusInternalServerError)
+			return
+		}
+
+		err = r.tokenVerifier.VerifyRequest(ctx, features, &r.audience, channel.Namespace, applyingEventPolicies, request, response)
+		if err != nil {
+			r.logger.Warn("could not verify authn and authz of request", zap.Error(err))
+			return
+		}
+		r.logger.Debug("Request contained a valid and authorized JWT. Continuing...")
 	}
 
 	err = r.receiverFunc(request.Context(), channel, *event, utils.PassThroughHeaders(request.Header))

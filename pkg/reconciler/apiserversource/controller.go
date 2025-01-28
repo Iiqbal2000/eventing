@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,16 @@ package apiserversource
 
 import (
 	"context"
+
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/filtered"
+	"knative.dev/pkg/kmeta"
+	"knative.dev/pkg/system"
+
+	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/auth"
+	"knative.dev/eventing/pkg/eventingtls"
 
 	"github.com/kelseyhightower/envconfig"
 	"k8s.io/client-go/tools/cache"
@@ -32,6 +42,11 @@ import (
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	deploymentinformer "knative.dev/pkg/client/injection/kube/informers/apps/v1/deployment"
 	"knative.dev/pkg/client/injection/kube/informers/core/v1/namespace"
+
+	serviceaccountinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/serviceaccount/filtered"
+
+	roleinformer "knative.dev/pkg/client/injection/kube/informers/rbac/v1/role/filtered"
+	rolebindinginformer "knative.dev/pkg/client/injection/kube/informers/rbac/v1/rolebinding/filtered"
 
 	apiserversourceinformer "knative.dev/eventing/pkg/client/injection/informers/sources/v1/apiserversource"
 	apiserversourcereconciler "knative.dev/eventing/pkg/client/injection/reconciler/sources/v1/apiserversource"
@@ -54,12 +69,32 @@ func NewController(
 	deploymentInformer := deploymentinformer.Get(ctx)
 	apiServerSourceInformer := apiserversourceinformer.Get(ctx)
 	namespaceInformer := namespace.Get(ctx)
+	oidcServiceaccountInformer := serviceaccountinformer.Get(ctx, auth.OIDCLabelSelector)
+
+	// Create a selector string
+	roleInformer := roleinformer.Get(ctx, auth.OIDCLabelSelector)
+	rolebindingInformer := rolebindinginformer.Get(ctx, auth.OIDCLabelSelector)
+
+	trustBundleConfigMapInformer := configmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector)
+
+	var globalResync func(obj interface{})
+
+	featureStore := feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"), func(name string, value interface{}) {
+		if globalResync != nil {
+			globalResync(nil)
+		}
+	})
+	featureStore.WatchConfigs(cmw)
 
 	r := &Reconciler{
-		kubeClientSet:   kubeclient.Get(ctx),
-		ceSource:        GetCfgHost(ctx),
-		configs:         reconcilersource.WatchConfigurations(ctx, component, cmw),
-		namespaceLister: namespaceInformer.Lister(),
+		kubeClientSet:              kubeclient.Get(ctx),
+		ceSource:                   GetCfgHost(ctx),
+		configs:                    reconcilersource.WatchConfigurations(ctx, component, cmw),
+		namespaceLister:            namespaceInformer.Lister(),
+		serviceAccountLister:       oidcServiceaccountInformer.Lister(),
+		roleLister:                 roleInformer.Lister(),
+		roleBindingLister:          rolebindingInformer.Lister(),
+		trustBundleConfigMapLister: trustBundleConfigMapInformer.Lister(),
 	}
 
 	env := &envConfig{}
@@ -68,13 +103,31 @@ func NewController(
 	}
 	r.receiveAdapterImage = env.Image
 
-	impl := apiserversourcereconciler.NewImpl(ctx, r)
+	impl := apiserversourcereconciler.NewImpl(ctx, r, func(impl *controller.Impl) controller.Options {
+		return controller.Options{
+			ConfigStore: featureStore,
+		}
+	})
+
+	globalResync = func(interface{}) {
+		impl.GlobalResync(apiServerSourceInformer.Informer())
+	}
 
 	r.sinkResolver = resolver.NewURIResolverFromTracker(ctx, impl.Tracker)
 
 	apiServerSourceInformer.Informer().AddEventHandler(controller.HandleAll(impl.Enqueue))
 
 	deploymentInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: controller.FilterController(&v1.ApiServerSource{}),
+		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
+	})
+
+	roleInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: controller.FilterController(&v1.ApiServerSource{}),
+		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
+	})
+
+	rolebindingInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
 		FilterFunc: controller.FilterController(&v1.ApiServerSource{}),
 		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
 	})
@@ -89,6 +142,34 @@ func NewController(
 		UpdateFunc: func(oldObj, newObj interface{}) { cb() },
 		DeleteFunc: func(obj interface{}) { cb() },
 	})
+
+	// Reconciler ApiServerSource when the OIDC service account changes
+	oidcServiceaccountInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: controller.FilterController(&v1.ApiServerSource{}),
+		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
+	})
+
+	trustBundleConfigMapInformer.Informer().AddEventHandler(controller.HandleAll(func(i interface{}) {
+		obj, err := kmeta.DeletionHandlingAccessor(i)
+		if err != nil {
+			return
+		}
+		if obj.GetNamespace() == system.Namespace() {
+			globalResync(i)
+			return
+		}
+
+		sources, err := apiServerSourceInformer.Lister().ApiServerSources(obj.GetNamespace()).List(labels.Everything())
+		if err != nil {
+			return
+		}
+		for _, src := range sources {
+			impl.EnqueueKey(types.NamespacedName{
+				Namespace: src.Namespace,
+				Name:      src.Name,
+			})
+		}
+	}))
 
 	return impl
 }

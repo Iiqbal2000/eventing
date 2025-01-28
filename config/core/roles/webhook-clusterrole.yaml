@@ -26,6 +26,9 @@ rules:
     resources:
       - "configmaps"
     verbs:
+      - "create"
+      - "update"
+      - "delete"
       - "get"
       - "list"
       - "watch"
@@ -72,7 +75,7 @@ rules:
     resources:
       - "mutatingwebhookconfigurations"
       - "validatingwebhookconfigurations"
-    verbs: &everything
+    verbs:
       - "get"
       - "list"
       - "create"
@@ -88,14 +91,30 @@ rules:
       - "sinkbindings"
       - "sinkbindings/status"
       - "sinkbindings/finalizers"
-    verbs: *everything
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
+
 
   # For leader election
   - apiGroups:
       - "coordination.k8s.io"
     resources:
       - "leases"
-    verbs: *everything
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
+
 
   # For creating events
   - apiGroups:
@@ -109,8 +128,63 @@ rules:
       - "create"
       - "patch"
 
+  - apiGroups:
+      - eventing.knative.dev
+    resources:
+      - eventpolicies
+    verbs:
+      - get
+      - list
+      - watch
+
+  # For the SinkBinding reconciler adding the OIDC identity service accounts
+  - apiGroups:
+      - ""
+    resources:
+      - "serviceaccounts"
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
+
+  # For the SinkBinding reconciler creating the sinkbinding token secret
+  - apiGroups:
+      - ""
+    resources:
+      - "serviceaccounts/token"
+    verbs:
+      - "create"
+  - apiGroups:
+      - ""
+    resources:
+      - "secrets"
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
+
+  # For checking if user has permissions to make a cross namespace resource
+  - apiGroups:
+      - "authorization.k8s.io"
+    resources:
+      - "subjectaccessreviews"
+    verbs:
+      - "create"
+
   # Necessary for conversion webhook. These are copied from the serving
   # TODO: Do we really need all these permissions?
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "create", "update", "delete", "patch", "watch"]
+
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create"]

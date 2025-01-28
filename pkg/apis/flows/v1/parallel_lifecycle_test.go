@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,14 @@ package v1
 import (
 	"testing"
 
+	"knative.dev/pkg/ptr"
+
 	"knative.dev/pkg/apis"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	messagingv1 "knative.dev/eventing/pkg/apis/messaging/v1"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
@@ -88,6 +91,9 @@ func TestParallelInitializeConditions(t *testing.T) {
 					Type:   ParallelConditionChannelsReady,
 					Status: corev1.ConditionUnknown,
 				}, {
+					Type:   ParallelConditionEventPoliciesReady,
+					Status: corev1.ConditionUnknown,
+				}, {
 					Type:   ParallelConditionReady,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -115,6 +121,9 @@ func TestParallelInitializeConditions(t *testing.T) {
 					Type:   ParallelConditionChannelsReady,
 					Status: corev1.ConditionFalse,
 				}, {
+					Type:   ParallelConditionEventPoliciesReady,
+					Status: corev1.ConditionUnknown,
+				}, {
 					Type:   ParallelConditionReady,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -140,6 +149,9 @@ func TestParallelInitializeConditions(t *testing.T) {
 					Status: corev1.ConditionUnknown,
 				}, {
 					Type:   ParallelConditionChannelsReady,
+					Status: corev1.ConditionUnknown,
+				}, {
+					Type:   ParallelConditionEventPoliciesReady,
 					Status: corev1.ConditionUnknown,
 				}, {
 					Type:   ParallelConditionReady,
@@ -237,6 +249,112 @@ func TestParallelPropagateSubscriptionStatuses(t *testing.T) {
 	}
 }
 
+func TestParallelPropagateSubscriptionOIDCServiceAccounts(t *testing.T) {
+	tests := []struct {
+		name        string
+		filterSubs  []*messagingv1.Subscription
+		subs        []*messagingv1.Subscription
+		wantOIDCSAs []string
+	}{{
+		name:       "empty",
+		filterSubs: []*messagingv1.Subscription{},
+		subs:       []*messagingv1.Subscription{},
+	}, {
+		name: "both subscriptions with OIDC SAs",
+		filterSubs: []*messagingv1.Subscription{{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("filterSub-oidc-sa"),
+				},
+			},
+		}}, subs: []*messagingv1.Subscription{{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("sub-oidc-sa"),
+				},
+			},
+		}},
+		wantOIDCSAs: []string{
+			"filterSub-oidc-sa",
+			"sub-oidc-sa",
+		},
+	}, {
+		name:       "filter subscription without OIDC SA",
+		filterSubs: []*messagingv1.Subscription{getSubscription("fsub0", false)},
+		subs: []*messagingv1.Subscription{{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("sub-oidc-sa"),
+				},
+			},
+		}},
+		wantOIDCSAs: []string{
+			"sub-oidc-sa",
+		},
+	}, {
+		name: "subscriber subscription without OIDC SA",
+		filterSubs: []*messagingv1.Subscription{{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("filterSub-oidc-sa"),
+				},
+			},
+		}},
+		subs: []*messagingv1.Subscription{getSubscription("sub0", false)},
+		wantOIDCSAs: []string{
+			"filterSub-oidc-sa",
+		},
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ps := ParallelStatus{}
+			ps.PropagateSubscriptionStatuses(test.filterSubs, test.subs)
+
+			var got []string
+			if ps.Auth != nil {
+				got = ps.Auth.ServiceAccountNames
+			}
+
+			if diff := cmp.Diff(test.wantOIDCSAs, got); diff != "" {
+				t.Errorf("unexpected OIDC service accounts (-want, +got) = %v", diff)
+			}
+		})
+	}
+}
+
 func TestParallelPropagateChannelStatuses(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -326,82 +444,101 @@ func TestParallelPropagateSubscriptionStatusUpdated(t *testing.T) {
 
 func TestParallelReady(t *testing.T) {
 	tests := []struct {
-		name     string
-		fsubs    []*messagingv1.Subscription
-		subs     []*messagingv1.Subscription
-		ichannel *eventingduckv1.Channelable
-		channels []*eventingduckv1.Channelable
-		want     bool
+		name               string
+		fsubs              []*messagingv1.Subscription
+		subs               []*messagingv1.Subscription
+		ichannel           *eventingduckv1.Channelable
+		channels           []*eventingduckv1.Channelable
+		eventPoliciesReady bool
+		want               bool
 	}{{
-		name:     "ingress false, empty",
-		fsubs:    []*messagingv1.Subscription{},
-		subs:     []*messagingv1.Subscription{},
-		ichannel: getChannelable(false),
-		channels: []*eventingduckv1.Channelable{},
-		want:     false,
+		name:               "ingress false, empty",
+		fsubs:              []*messagingv1.Subscription{},
+		subs:               []*messagingv1.Subscription{},
+		ichannel:           getChannelable(false),
+		channels:           []*eventingduckv1.Channelable{},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress true, empty",
-		fsubs:    []*messagingv1.Subscription{},
-		subs:     []*messagingv1.Subscription{},
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{},
-		want:     false,
+		name:               "ingress true, empty",
+		fsubs:              []*messagingv1.Subscription{},
+		subs:               []*messagingv1.Subscription{},
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress true, one channelable not ready, one subscription ready",
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{getChannelable(false)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true)},
-		want:     false,
+		name:               "ingress true, one channelable not ready, one subscription ready",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(false)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress true, one channelable ready, one subscription not ready",
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{getChannelable(true)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", false)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", false)},
-		want:     false,
+		name:               "ingress true, one channelable ready, one subscription not ready",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", false)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", false)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress false, one channelable ready, one subscription ready",
-		ichannel: getChannelable(false),
-		channels: []*eventingduckv1.Channelable{getChannelable(true)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true)},
-		want:     false,
+		name:               "ingress false, one channelable ready, one subscription ready",
+		ichannel:           getChannelable(false),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress true, one channelable ready, one subscription ready",
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{getChannelable(true)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true)},
-		want:     true,
+		name:               "ingress true, one channelable ready, one subscription ready",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true)},
+		eventPoliciesReady: true,
+		want:               true,
 	}, {
-		name:     "ingress true, one channelable ready, one not, two subscriptions ready",
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(false)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
-		want:     false,
+		name:               "ingress true, one channelable ready, one not, two subscriptions ready",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(false)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress true, two channelables ready, one subscription ready, one not",
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", false)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", false)},
-		want:     false,
+		name:               "ingress true, two channelables ready, one subscription ready, one not",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", false)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", false)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress false, two channelables ready, two subscriptions ready",
-		ichannel: getChannelable(false),
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
-		want:     false,
+		name:               "ingress false, two channelables ready, two subscriptions ready",
+		ichannel:           getChannelable(false),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "ingress true, two channelables ready, two subscriptions ready",
-		ichannel: getChannelable(true),
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
-		fsubs:    []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
-		want:     true,
+		name:               "ingress true, two channelables ready, two subscriptions ready",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
+		eventPoliciesReady: true,
+		want:               true,
+	}, {
+		name:               "ingress true, two channelables ready, two subscriptions ready, event policies not ready",
+		ichannel:           getChannelable(true),
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
+		fsubs:              []*messagingv1.Subscription{getSubscription("fsub0", true), getSubscription("fsub1", true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
+		eventPoliciesReady: false,
+		want:               false,
 	}}
 
 	for _, test := range tests {
@@ -409,6 +546,12 @@ func TestParallelReady(t *testing.T) {
 			ps := ParallelStatus{}
 			ps.PropagateChannelStatuses(test.ichannel, test.channels)
 			ps.PropagateSubscriptionStatuses(test.fsubs, test.subs)
+
+			if test.eventPoliciesReady {
+				ps.MarkEventPoliciesTrue()
+			} else {
+				ps.MarkEventPoliciesFailed("", "")
+			}
 			got := ps.IsReady()
 			want := test.want
 			if want != got {
@@ -420,6 +563,7 @@ func TestParallelReady(t *testing.T) {
 
 func TestParallelPropagateSetAddress(t *testing.T) {
 	URL := apis.HTTP("example.com")
+	audience := pointer.String("foo-bar")
 	tests := []struct {
 		name       string
 		address    *duckv1.Addressable
@@ -444,6 +588,11 @@ func TestParallelPropagateSetAddress(t *testing.T) {
 		name:       "nil",
 		address:    &duckv1.Addressable{URL: nil},
 		want:       &duckv1.Addressable{},
+		wantStatus: corev1.ConditionTrue,
+	}, {
+		name:       "Audience",
+		address:    &duckv1.Addressable{Audience: audience},
+		want:       &duckv1.Addressable{Audience: audience},
 		wantStatus: corev1.ConditionTrue,
 	}}
 

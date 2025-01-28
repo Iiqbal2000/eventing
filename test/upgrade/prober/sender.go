@@ -4,7 +4,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * 	http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@
 package prober
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -51,7 +52,8 @@ func (p *prober) deploySender() {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app": sender.Name,
+						"app":                     sender.Name,
+						"sidecar.istio.io/inject": "true",
 					},
 					Annotations: map[string]string{
 						"sidecar.istio.io/inject":                "true",
@@ -107,7 +109,7 @@ func (p *prober) removeSender() {
 	p.ensureNoError(err)
 
 	var d *appsv1.Deployment
-	pollErr := wait.PollImmediate(time.Second, time.Minute, func() (done bool, err error) {
+	pollErr := wait.PollUntilContextTimeout(context.Background(), time.Second, time.Minute, true, func(ctx context.Context) (done bool, err error) {
 		// Save err and deployment for error reporting.
 		d, err = p.client.Kube.AppsV1().
 			Deployments(p.client.Namespace).

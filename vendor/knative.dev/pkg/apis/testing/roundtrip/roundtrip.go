@@ -135,7 +135,7 @@ func ExternalTypesViaHub(t *testing.T, scheme, hubs *runtime.Scheme, fuzzerFuncs
 			continue
 		}
 
-		if reflect.PtrTo(objType).AssignableTo(metaV1ListType) {
+		if reflect.PointerTo(objType).AssignableTo(metaV1ListType) {
 			continue
 		}
 
@@ -144,7 +144,7 @@ func ExternalTypesViaHub(t *testing.T, scheme, hubs *runtime.Scheme, fuzzerFuncs
 		}
 
 		t.Run(gvk.Group+"."+gvk.Version+"."+gvk.Kind, func(t *testing.T) {
-			for i := 0; i < *roundtrip.FuzzIters; i++ {
+			for range *roundtrip.FuzzIters {
 				roundTripViaHub(t, gvk, scheme, hubs, f)
 
 				if t.Failed() {
@@ -203,7 +203,6 @@ func objForGVK(t *testing.T,
 	gvk schema.GroupVersionKind,
 	scheme *runtime.Scheme,
 ) convertibleObject {
-
 	t.Helper()
 
 	obj, err := scheme.New(gvk)
@@ -235,7 +234,6 @@ func hubInstanceForGK(t *testing.T,
 	hubs *runtime.Scheme,
 	gk schema.GroupKind,
 ) (apis.Convertible, schema.GroupVersionKind) {
-
 	t.Helper()
 
 	for hubGVK := range hubs.AllKnownTypes() {

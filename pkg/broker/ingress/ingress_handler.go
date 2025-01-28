@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,6 +23,9 @@ import (
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/utils/ptr"
+
 	opencensusclient "github.com/cloudevents/sdk-go/observability/opencensus/v2/client"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/cloudevents/sdk-go/v2/binding"
@@ -31,17 +34,21 @@ import (
 	"go.opencensus.io/trace"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/types"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/pointer"
 
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"knative.dev/pkg/system"
 
 	"knative.dev/eventing/pkg/apis/eventing"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/broker"
 	v1 "knative.dev/eventing/pkg/client/informers/externalversions/eventing/v1"
 	eventinglisters "knative.dev/eventing/pkg/client/listers/eventing/v1"
+	"knative.dev/eventing/pkg/eventingtls"
 	"knative.dev/eventing/pkg/eventtype"
 	"knative.dev/eventing/pkg/kncloudevents"
 	"knative.dev/eventing/pkg/tracing"
@@ -64,39 +71,49 @@ type Handler struct {
 	EvenTypeHandler *eventtype.EventTypeAutoHandler
 
 	Logger *zap.Logger
+
+	eventDispatcher *kncloudevents.Dispatcher
+
+	tokenVerifier *auth.Verifier
+
+	withContext func(ctx context.Context) context.Context
 }
 
-func NewHandler(logger *zap.Logger, reporter StatsReporter, defaulter client.EventDefaulter, brokerInformer v1.BrokerInformer) (*Handler, error) {
+func NewHandler(logger *zap.Logger, reporter StatsReporter, defaulter client.EventDefaulter, brokerInformer v1.BrokerInformer, tokenVerifier *auth.Verifier, oidcTokenProvider *auth.OIDCTokenProvider, trustBundleConfigMapLister corev1listers.ConfigMapNamespaceLister, withContext func(ctx context.Context) context.Context) (*Handler, error) {
 	connectionArgs := kncloudevents.ConnectionArgs{
 		MaxIdleConns:        defaultMaxIdleConnections,
 		MaxIdleConnsPerHost: defaultMaxIdleConnectionsPerHost,
 	}
 	kncloudevents.ConfigureConnectionArgs(&connectionArgs)
 
+	clientConfig := eventingtls.ClientConfig{
+		TrustBundleConfigMapLister: trustBundleConfigMapLister,
+	}
+
 	brokerInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			broker, ok := obj.(eventingv1.Broker)
-			if !ok {
+			broker, ok := obj.(*eventingv1.Broker)
+			if !ok || broker == nil || broker.Status.Address == nil {
 				return
 			}
-			kncloudevents.AddOrUpdateAddressableHandler(duckv1.Addressable{
+			kncloudevents.AddOrUpdateAddressableHandler(clientConfig, duckv1.Addressable{
 				URL:     broker.Status.Address.URL,
 				CACerts: broker.Status.Address.CACerts,
 			})
 		},
 		UpdateFunc: func(_, obj interface{}) {
-			broker, ok := obj.(eventingv1.Broker)
-			if !ok {
+			broker, ok := obj.(*eventingv1.Broker)
+			if !ok || broker == nil || broker.Status.Address == nil {
 				return
 			}
-			kncloudevents.AddOrUpdateAddressableHandler(duckv1.Addressable{
+			kncloudevents.AddOrUpdateAddressableHandler(clientConfig, duckv1.Addressable{
 				URL:     broker.Status.Address.URL,
 				CACerts: broker.Status.Address.CACerts,
 			})
 		},
 		DeleteFunc: func(obj interface{}) {
-			broker, ok := obj.(eventingv1.Broker)
-			if !ok {
+			broker, ok := obj.(*eventingv1.Broker)
+			if !ok || broker == nil || broker.Status.Address == nil {
 				return
 			}
 			kncloudevents.DeleteAddressableHandler(duckv1.Addressable{
@@ -107,10 +124,13 @@ func NewHandler(logger *zap.Logger, reporter StatsReporter, defaulter client.Eve
 	})
 
 	return &Handler{
-		Defaulter:    defaulter,
-		Reporter:     reporter,
-		Logger:       logger,
-		BrokerLister: brokerInformer.Lister(),
+		Defaulter:       defaulter,
+		Reporter:        reporter,
+		Logger:          logger,
+		BrokerLister:    brokerInformer.Lister(),
+		eventDispatcher: kncloudevents.NewDispatcher(clientConfig, oidcTokenProvider),
+		tokenVerifier:   tokenVerifier,
+		withContext:     withContext,
 	}, nil
 }
 
@@ -123,11 +143,7 @@ func (h *Handler) getBroker(name, namespace string) (*eventingv1.Broker, error) 
 	return broker, nil
 }
 
-func (h *Handler) getChannelAddress(name, namespace string) (*duckv1.Addressable, error) {
-	broker, err := h.getBroker(name, namespace)
-	if err != nil {
-		return nil, err
-	}
+func (h *Handler) getChannelAddress(broker *eventingv1.Broker) (*duckv1.Addressable, error) {
 	if broker.Status.Annotations == nil {
 		return nil, fmt.Errorf("broker status annotations uninitialized")
 	}
@@ -141,15 +157,18 @@ func (h *Handler) getChannelAddress(name, namespace string) (*duckv1.Addressable
 		return nil, fmt.Errorf("failed to parse channel address url")
 	}
 
-	var caCerts *string
-	certs, present := broker.Status.Annotations[eventing.BrokerChannelCACertsStatusAnnotationKey]
-	if present && certs != "" {
-		caCerts = pointer.String(certs)
-	}
 	addr := &duckv1.Addressable{
-		URL:     url,
-		CACerts: caCerts,
+		URL: url,
 	}
+
+	if certs, ok := broker.Status.Annotations[eventing.BrokerChannelCACertsStatusAnnotationKey]; ok && certs != "" {
+		addr.CACerts = &certs
+	}
+
+	if audience, ok := broker.Status.Annotations[eventing.BrokerChannelAudienceStatusAnnotationKey]; ok && audience != "" {
+		addr.Audience = &audience
+	}
+
 	return addr, nil
 }
 
@@ -180,7 +199,7 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	ctx := request.Context()
+	ctx := h.withContext(request.Context())
 
 	message := cehttp.NewMessageFromHttpRequest(request)
 	defer message.Finish(nil)
@@ -207,6 +226,29 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		Namespace: brokerNamespace,
 	}
 
+	broker, err := h.getBroker(brokerName, brokerNamespace)
+	if apierrors.IsNotFound(err) {
+		h.Logger.Warn("Failed to retrieve broker", zap.Error(err))
+		writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		h.Logger.Warn("Failed to retrieve broker", zap.Error(err))
+		writer.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	features := feature.FromContext(ctx)
+	audience := ptr.To("")
+	if broker.Status.Address != nil {
+		audience = broker.Status.Address.Audience
+	}
+	err = h.tokenVerifier.VerifyRequest(ctx, features, audience, brokerNamespace, broker.Status.Policies, request, writer)
+	if err != nil {
+		h.Logger.Warn("Failed to verify AuthN and AuthZ.", zap.Error(err))
+		return
+	}
+
 	ctx, span := trace.StartSpan(ctx, tracing.BrokerMessagingDestination(brokerNamespacedName))
 	defer span.End()
 
@@ -226,7 +268,13 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		eventType: event.Type(),
 	}
 
-	statusCode, dispatchTime := h.receive(ctx, utils.PassThroughHeaders(request.Header), event, brokerNamespace, brokerName)
+	if request.TLS != nil {
+		reporterArgs.eventScheme = "https"
+	} else {
+		reporterArgs.eventScheme = "http"
+	}
+
+	statusCode, dispatchTime := h.receive(ctx, utils.PassThroughHeaders(request.Header), event, broker)
 	if dispatchTime > kncloudevents.NoDuration {
 		_ = h.Reporter.ReportEventDispatchTime(reporterArgs, statusCode, dispatchTime)
 	}
@@ -236,27 +284,28 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 	// EventType auto-create feature handling
 	if h.EvenTypeHandler != nil {
-		b, err := h.getBroker(brokerName, brokerNamespace)
-		if err != nil {
-			h.Logger.Warn("Failed to retrieve broker", zap.Error(err))
-		}
-		if err := h.EvenTypeHandler.AutoCreateEventType(ctx, event, toKReference(b), b.GetUID()); err != nil {
-			h.Logger.Error("Even type auto create failed", zap.Error(err))
-		}
+		h.EvenTypeHandler.AutoCreateEventType(ctx, event, toKReference(broker), broker.GetUID())
 	}
 }
 
 func toKReference(broker *eventingv1.Broker) *duckv1.KReference {
-	return &duckv1.KReference{
+	kref := &duckv1.KReference{
 		Kind:       broker.Kind,
 		Namespace:  broker.Namespace,
 		Name:       broker.Name,
 		APIVersion: broker.APIVersion,
 		Address:    broker.Status.Address.Name,
 	}
+	if kref.Kind == "" {
+		kref.Kind = "Broker"
+	}
+	if kref.APIVersion == "" {
+		kref.APIVersion = "eventing.knative.dev/v1"
+	}
+	return kref
 }
 
-func (h *Handler) receive(ctx context.Context, headers http.Header, event *cloudevents.Event, brokerNamespace, brokerName string) (int, time.Duration) {
+func (h *Handler) receive(ctx context.Context, headers http.Header, event *cloudevents.Event, brokerObj *eventingv1.Broker) (int, time.Duration) {
 	// Setting the extension as a string as the CloudEvents sdk does not support non-string extensions.
 	event.SetExtension(broker.EventArrivalTime, cloudevents.Timestamp{Time: time.Now()})
 	if h.Defaulter != nil {
@@ -269,13 +318,21 @@ func (h *Handler) receive(ctx context.Context, headers http.Header, event *cloud
 		return http.StatusBadRequest, kncloudevents.NoDuration
 	}
 
-	channelAddress, err := h.getChannelAddress(brokerName, brokerNamespace)
+	channelAddress, err := h.getChannelAddress(brokerObj)
 	if err != nil {
-		h.Logger.Warn("Broker not found in the namespace", zap.Error(err))
-		return http.StatusBadRequest, kncloudevents.NoDuration
+		h.Logger.Warn("could not get channel address from broker", zap.Error(err))
+		return http.StatusInternalServerError, kncloudevents.NoDuration
 	}
 
-	dispatchInfo, err := kncloudevents.SendEvent(ctx, *event, *channelAddress, kncloudevents.WithHeader(headers))
+	opts := []kncloudevents.SendOption{
+		kncloudevents.WithHeader(headers),
+		kncloudevents.WithOIDCAuthentication(&types.NamespacedName{
+			Name:      "mt-broker-ingress-oidc",
+			Namespace: system.Namespace(),
+		}),
+	}
+
+	dispatchInfo, err := h.eventDispatcher.SendEvent(ctx, *event, *channelAddress, opts...)
 	if err != nil {
 		h.Logger.Error("failed to dispatch event", zap.Error(err))
 		return http.StatusInternalServerError, kncloudevents.NoDuration

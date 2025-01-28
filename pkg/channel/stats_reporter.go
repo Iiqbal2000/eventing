@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -54,13 +54,15 @@ var (
 	// - characters are printable US-ASCII
 	namespaceKey         = tag.MustNewKey(eventingmetrics.LabelNamespaceName)
 	eventTypeKey         = tag.MustNewKey(eventingmetrics.LabelEventType)
+	eventScheme          = tag.MustNewKey(eventingmetrics.LabelEventScheme)
 	responseCodeKey      = tag.MustNewKey(eventingmetrics.LabelResponseCode)
 	responseCodeClassKey = tag.MustNewKey(eventingmetrics.LabelResponseCodeClass)
 )
 
 type ReportArgs struct {
-	Ns        string
-	EventType string
+	Ns          string
+	EventType   string
+	EventScheme string
 }
 
 func init() {
@@ -93,6 +95,7 @@ func register() {
 	tagKeys := []tag.Key{
 		namespaceKey,
 		eventTypeKey,
+		eventScheme,
 		responseCodeKey,
 		responseCodeClassKey,
 		UniqueTagKey,
@@ -145,6 +148,7 @@ func (r *reporter) generateTag(args *ReportArgs, responseCode int) (context.Cont
 		emptyContext,
 		tag.Insert(namespaceKey, args.Ns),
 		tag.Insert(eventTypeKey, args.EventType),
+		tag.Insert(eventScheme, args.EventScheme),
 		tag.Insert(responseCodeKey, strconv.Itoa(responseCode)),
 		tag.Insert(responseCodeClassKey, metrics.ResponseCodeClass(responseCode)),
 		tag.Insert(ContainerTagKey, r.container),

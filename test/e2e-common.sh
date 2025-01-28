@@ -42,6 +42,8 @@ readonly MT_CHANNEL_BASED_BROKER_CONFIG_DIR="config/brokers/mt-channel-broker"
 # MT Channel Based Broker config.
 readonly MT_CHANNEL_BASED_BROKER_DEFAULT_CONFIG="config/core/configmaps/default-broker.yaml"
 
+readonly EVENTING_TLS_TEST_CONFIG_DIR="test/config/tls"
+
 # Config tracing config.
 readonly CONFIG_TRACING_CONFIG="test/config/config-tracing.yaml"
 
@@ -87,6 +89,10 @@ function knative_setup() {
   enable_sugar || fail_test "Could not enable Sugar Controller Injection"
 
   unleash_duck || fail_test "Could not unleash the chaos duck"
+
+  install_feature_cm || fail_test "Could not install features configmap"
+
+  create_knsubscribe_rolebinding || fail_test "Could not create knsubscribe rolebinding"
 }
 
 function scale_controlplane() {
@@ -98,6 +104,11 @@ function scale_controlplane() {
     # Scale up components for HA tests
     kubectl -n "${SYSTEM_NAMESPACE}" scale deployment "$deployment" --replicas="${REPLICAS}" || failed=1
   done
+}
+
+function create_knsubscribe_rolebinding() {
+  kubectl delete clusterrolebinding knsubscribe-test-rb --ignore-not-found=true
+  kubectl create clusterrolebinding knsubscribe-test-rb --user=$(kubectl auth whoami -ojson | jq .status.userInfo.username -r) --clusterrole=crossnamespace-subscriber
 }
 
 # Install Knative Monitoring in the current cluster.
@@ -176,10 +187,15 @@ function install_knative_eventing() {
     UNINSTALL_LIST+=( "${EVENTING_RELEASE_YAML}" )
   fi
 
+  # Workaround for https://github.com/knative/eventing/issues/8161
+  kubectl label namespace "${SYSTEM_NAMESPACE}" bindings.knative.dev/exclude=true --overwrite
+
   # Setup config tracing for tracing tests
   local TMP_CONFIG_TRACING_CONFIG=${TMP_DIR}/${CONFIG_TRACING_CONFIG##*/}
   sed "s/namespace: ${KNATIVE_DEFAULT_NAMESPACE}/namespace: ${SYSTEM_NAMESPACE}/g" "${CONFIG_TRACING_CONFIG}" > "${TMP_CONFIG_TRACING_CONFIG}"
   kubectl replace -f "${TMP_CONFIG_TRACING_CONFIG}"
+
+  kubectl apply -Rf "${EVENTING_TLS_TEST_CONFIG_DIR}"
 
   scale_controlplane eventing-webhook eventing-controller
 
@@ -221,7 +237,7 @@ function install_mt_broker() {
   if [[ -z "${EVENTING_MT_CHANNEL_BROKER_YAML:-}" ]]; then
     build_knative_from_source
   else
-    echo "use exist EVENTING_MT_CHANNEL_BROKER_YAML"
+    echo "use existing EVENTING_MT_CHANNEL_BROKER_YAML"
   fi
   local EVENTING_MT_CHANNEL_BROKER_NAME=${TMP_DIR}/${EVENTING_MT_CHANNEL_BROKER_YAML##*/}
   sed "s/namespace: ${KNATIVE_DEFAULT_NAMESPACE}/namespace: ${SYSTEM_NAMESPACE}/g" "${EVENTING_MT_CHANNEL_BROKER_YAML}" > "${EVENTING_MT_CHANNEL_BROKER_NAME}"
@@ -231,6 +247,20 @@ function install_mt_broker() {
   scale_controlplane mt-broker-controller
 
   wait_until_pods_running "${SYSTEM_NAMESPACE}" || fail_test "Knative Eventing with MT Broker did not come up"
+}
+
+function install_post_install_job() {
+    # Var defined and populated by generate-yaml.sh
+    if [[ -z "${EVENTING_POST_INSTALL_YAML:-}" ]]; then
+        build_knative_from_source
+      else
+        echo "use existing EVENTING_POST_INSTALL_YAML"
+      fi
+    local EVENTING_POST_INSTALL_NAME=${TMP_DIR}/${EVENTING_POST_INSTALL_YAML##*/}
+    sed "s/namespace: ${KNATIVE_DEFAULT_NAMESPACE}/namespace: ${SYSTEM_NAMESPACE}/g" "${EVENTING_POST_INSTALL_YAML}" > "${EVENTING_POST_INSTALL_NAME=}"
+    kubectl create \
+      -f "${EVENTING_POST_INSTALL_NAME}" || return 1
+    UNINSTALL_LIST+=( "${EVENTING_POST_INSTALL_NAME}" )
 }
 
 function enable_sugar() {
@@ -257,19 +287,29 @@ function unleash_duck() {
     if (( SCALE_CHAOSDUCK_TO_ZERO )); then kubectl -n "${SYSTEM_NAMESPACE}" scale deployment/chaosduck --replicas=0; fi
 }
 
+function install_feature_cm() {
+  KO_FLAGS="${KO_FLAGS:-}"
+  echo "install feature configmap"
+  cat test/config/config-features.yaml | \
+  sed "s/namespace: ${KNATIVE_DEFAULT_NAMESPACE}/namespace: ${SYSTEM_NAMESPACE}/g" | \
+  ko apply "${KO_FLAGS}" -f - || return $?
+}
+
 # Teardown the Knative environment after tests finish.
 function knative_teardown() {
   echo ">> Stopping Knative Eventing"
   for i in "${!UNINSTALL_LIST[@]}"; do
     # We uninstall elements in the reverse of the order they were installed.
-    local YAML="${UNINSTALL_LIST[$(( ${#array[@]} - $i ))]}"
+    local YAML="${UNINSTALL_LIST[$(( ${#UNINSTALL_LIST[@]} - 1 - $i ))]}"
     echo ">> Bringing down YAML: ${YAML}"
     kubectl delete --ignore-not-found=true -f "${YAML}" || return 1
   done
+  kubectl delete --ignore-not-found=true namespace "${CERT_MANAGER_NAMESPACE}"
+  wait_until_object_does_not_exist namespaces "${CERT_MANAGER_NAMESPACE}" ""
   kubectl delete --ignore-not-found=true namespace "${SYSTEM_NAMESPACE}"
-  wait_until_object_does_not_exist namespaces "${SYSTEM_NAMESPACE}"
+  wait_until_object_does_not_exist namespaces "${SYSTEM_NAMESPACE}" ""
   kubectl delete --ignore-not-found=true namespace 'knative-monitoring'
-  wait_until_object_does_not_exist namespaces 'knative-monitoring'
+  wait_until_object_does_not_exist namespaces 'knative-monitoring' ""
 }
 
 # Add function call to trap
@@ -388,8 +428,14 @@ function wait_for_file() {
 }
 
 function install_cert_manager() {
-  kubectl apply -f third_party/cert-manager/01-cert-manager.crds.yaml
-  kubectl apply -f third_party/cert-manager/02-cert-manager.yaml
+  kubectl apply -f third_party/cert-manager/00-namespace.yaml
 
+  timeout 600 bash -c 'until kubectl apply -f third_party/cert-manager/01-cert-manager.yaml; do sleep 5; done'
   wait_until_pods_running "$CERT_MANAGER_NAMESPACE" || fail_test "Failed to install cert manager"
+
+  timeout 600 bash -c 'until kubectl apply -f third_party/cert-manager/02-trust-manager.yaml; do sleep 5; done'
+  wait_until_pods_running "$CERT_MANAGER_NAMESPACE" || fail_test "Failed to install cert manager"
+
+  UNINSTALL_LIST+=( "third_party/cert-manager/01-cert-manager.yaml" )
+  UNINSTALL_LIST+=( "third_party/cert-manager/02-trust-manager.yaml" )
 }

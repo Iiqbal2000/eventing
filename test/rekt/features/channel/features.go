@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,7 @@ import (
 	"github.com/cloudevents/sdk-go/v2/binding"
 	"github.com/cloudevents/sdk-go/v2/test"
 	"github.com/google/uuid"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	"knative.dev/pkg/network"
 	"knative.dev/reconciler-test/pkg/environment"
@@ -37,6 +38,7 @@ import (
 
 	eventasssert "knative.dev/reconciler-test/pkg/eventshub/assert"
 
+	v1 "knative.dev/eventing/pkg/apis/messaging/v1"
 	"knative.dev/eventing/test/rekt/features"
 	"knative.dev/eventing/test/rekt/resources/channel"
 	"knative.dev/eventing/test/rekt/resources/channel_impl"
@@ -47,8 +49,16 @@ import (
 
 func ChannelChain(length int, createSubscriberFn func(ref *duckv1.KReference, uri string) manifest.CfgFn) *feature.Feature {
 	f := feature.NewFeature()
-	sink := feature.MakeRandomK8sName("sink")
-	cs := feature.MakeRandomK8sName("containersource")
+
+	sink, channel := ChannelChainSetup(f, length, createSubscriberFn)
+
+	ChannelChainAssert(f, sink, channel)
+
+	return f
+}
+
+func ChannelChainSetup(f *feature.Feature, length int, createSubscriberFn func(ref *duckv1.KReference, uri string) manifest.CfgFn) (sink string, channel string) {
+	sink = feature.MakeRandomK8sName("sink")
 
 	var channels []string
 	for i := 0; i < length; i++ {
@@ -79,13 +89,19 @@ func ChannelChain(length int, createSubscriberFn func(ref *duckv1.KReference, ur
 		f.Setup("subscription is ready", subscription.IsReady(sub))
 	}
 
-	// attach the first channel to the source
-	f.Requirement("install containersource", containersource.Install(cs, containersource.WithSink(channel_impl.AsDestinationRef(channels[0]))))
+	return sink, channels[0]
+}
+
+func ChannelChainAssert(f *feature.Feature, sink, channel string) {
+	cs := feature.MakeRandomK8sName("containersource")
+	eventType := feature.MakeRandomK8sName("et")
+	args := "--eventType=" + eventType
+	f.Requirement("install containersource", containersource.Install(cs,
+		containersource.WithSink(channel_impl.AsDestinationRef(channel)),
+		containersource.WithArgs(args)))
 	f.Requirement("containersource goes ready", containersource.IsReady(cs))
 
-	f.Assert("chained channels relay events", assert.OnStore(sink).MatchEvent(test.HasType("dev.knative.eventing.samples.heartbeat")).AtLeast(1))
-
-	return f
+	f.Assert("chained channels relay events", assert.OnStore(sink).MatchEvent(test.HasType(eventType)).AtLeast(1))
 }
 
 func DeadLetterSink(createSubscriberFn func(ref *duckv1.KReference, uri string) manifest.CfgFn) *feature.Feature {
@@ -116,6 +132,93 @@ func DeadLetterSink(createSubscriberFn func(ref *duckv1.KReference, uri string) 
 			MatchEvent(test.HasType("dev.knative.eventing.samples.heartbeat")).
 			AtLeast(1)(ctx, t)
 	})
+
+	return f
+}
+
+func AsyncHandler(createSubscriberFn func(ref *duckv1.KReference, uri string) manifest.CfgFn) *feature.Feature {
+	f := feature.NewFeature()
+	sink := feature.MakeRandomK8sName("sink")
+	source := feature.MakeRandomK8sName("source")
+	name := feature.MakeRandomK8sName("channel")
+	sub := feature.MakeRandomK8sName("subscription")
+
+	event := test.FullEvent()
+	event.SetID(uuid.New().String())
+
+	f.Setup("install sink", eventshub.Install(sink, eventshub.StartReceiver))
+	f.Setup("install channel", channel_impl.Install(name, channel_impl.WithAnnotations(map[string]interface{}{
+		v1.AsyncHandlerAnnotation: "true",
+	})))
+	f.Setup("install subscription", subscription.Install(sub,
+		subscription.WithChannel(channel_impl.AsRef(name)),
+		createSubscriberFn(service.AsKReference(sink), ""),
+	))
+	f.Setup("channel is ready", channel_impl.IsReady(name))
+	f.Setup("subscription is ready", subscription.IsReady(sub))
+
+	f.Requirement("install source", eventshub.Install(source, eventshub.InputEvent(event), eventshub.StartSenderToResource(channel_impl.GVR(), name)))
+
+	f.Assert("Event sent", assert.OnStore(source).
+		MatchSentEvent(test.HasId(event.ID())).
+		AtLeast(1),
+	)
+	f.Assert("sink receives event", assert.OnStore(sink).
+		MatchEvent(test.HasId(event.ID())).
+		AtLeast(1),
+	)
+
+	return f
+}
+
+func AsyncHandlerUpdate(createSubscriberFn func(ref *duckv1.KReference, uri string) manifest.CfgFn) *feature.Feature {
+	f := feature.NewFeature()
+	sink := feature.MakeRandomK8sName("sink")
+	source := feature.MakeRandomK8sName("source")
+	name := feature.MakeRandomK8sName("channel")
+	sub := feature.MakeRandomK8sName("subscription")
+
+	event := test.FullEvent()
+	event.SetID(uuid.New().String())
+
+	f.Setup("install sink", eventshub.Install(sink, eventshub.StartReceiver))
+	f.Setup("install channel", channel_impl.Install(name, channel_impl.WithAnnotations(map[string]interface{}{
+		v1.AsyncHandlerAnnotation: "true",
+	})))
+	f.Setup("install subscription", subscription.Install(sub,
+		subscription.WithChannel(channel_impl.AsRef(name)),
+		createSubscriberFn(service.AsKReference(sink), ""),
+	))
+	f.Setup("channel is ready", channel_impl.IsReady(name))
+	f.Setup("subscription is ready", subscription.IsReady(sub))
+
+	f.Requirement("update channel async handler", func(ctx context.Context, t feature.T) {
+		dc := Client(ctx)
+
+		imc, err := dc.ChannelImpl.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("Failed to retrieve InMemoryChannel: %v", err)
+		}
+		// swap and update it to false
+		imc.SetAnnotations(map[string]string{
+			v1.AsyncHandlerAnnotation: "true",
+		})
+		if _, err := dc.ChannelImpl.Update(ctx, imc, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("Failed to update async handler annotation: %v", err)
+		}
+	})
+
+	f.Requirement("channel is ready", channel_impl.IsReady(name))
+	f.Requirement("install source", eventshub.Install(source, eventshub.InputEvent(event), eventshub.StartSenderToResource(channel_impl.GVR(), name)))
+
+	f.Assert("Event sent", assert.OnStore(source).
+		MatchSentEvent(test.HasId(event.ID())).
+		AtLeast(1),
+	)
+	f.Assert("sink receives event", assert.OnStore(sink).
+		MatchEvent(test.HasId(event.ID())).
+		AtLeast(1),
+	)
 
 	return f
 }
@@ -218,12 +321,12 @@ func EventTransformation() *feature.Feature {
 	f.Setup("install channel 2", channel_impl.Install(channel2))
 	f.Setup("install subscription 1", subscription.Install(subscription1,
 		subscription.WithChannel(channel_impl.AsRef(channel1)),
-		subscription.WithSubscriber(prober.AsKReference("transform"), ""),
+		subscription.WithSubscriber(prober.AsKReference("transform"), "", ""),
 		subscription.WithReply(channel_impl.AsRef(channel2), ""),
 	))
 	f.Setup("install subscription 2", subscription.Install(subscription2,
 		subscription.WithChannel(channel_impl.AsRef(channel2)),
-		subscription.WithSubscriber(prober.AsKReference("sink"), ""),
+		subscription.WithSubscriber(prober.AsKReference("sink"), "", ""),
 	))
 	f.Setup("subscription 1 is ready", subscription.IsReady(subscription1))
 	f.Setup("subscription 2 is ready", subscription.IsReady(subscription2))
@@ -264,7 +367,7 @@ func SingleEventWithEncoding(encoding binding.Encoding) *feature.Feature {
 	f.Setup("install channel", channel_impl.Install(channel))
 	f.Setup("install subscription", subscription.Install(sub,
 		subscription.WithChannel(channel_impl.AsRef(channel)),
-		subscription.WithSubscriber(prober.AsKReference("sink"), ""),
+		subscription.WithSubscriber(prober.AsKReference("sink"), "", ""),
 	))
 
 	f.Setup("subscription is ready", subscription.IsReady(sub))
@@ -358,14 +461,13 @@ func channelSubscriberUnreachable(createSubscriberFn func(ref *duckv1.KReference
 	f.Setup("channel is ready", channel_impl.IsReady(channelName))
 	f.Setup("channel is addressable", channel_impl.IsAddressable(channelName))
 	f.Setup("subscription is ready", subscription.IsReady(sub))
+	f.Setup("channel has dead letter sink uri", channel_impl.HasDeadLetterSinkURI(channelName, channel_impl.GVR()))
 
 	f.Requirement("install source", eventshub.Install(
 		sourceName,
 		eventshub.StartSenderToResource(channel_impl.GVR(), channelName),
 		eventshub.InputEvent(ev),
 	))
-
-	f.Requirement("Channel has dead letter sink uri", channel_impl.HasDeadLetterSinkURI(channelName, channel_impl.GVR()))
 
 	f.Assert("Receives dls extensions when subscriber is unreachable", eventasssert.OnStore(sink).
 		MatchEvent(
@@ -403,14 +505,13 @@ func channelSubscriberReturnedErrorNoData(createSubscriberFn func(ref *duckv1.KR
 	f.Setup("channel is ready", channel_impl.IsReady(channelName))
 	f.Setup("channel is addressable", channel_impl.IsAddressable(channelName))
 	f.Setup("subscription is ready", subscription.IsReady(sub))
+	f.Setup("channel has dead letter sink uri", channel_impl.HasDeadLetterSinkURI(channelName, channel_impl.GVR()))
 
 	f.Requirement("install source", eventshub.Install(
 		sourceName,
 		eventshub.StartSenderToResource(channel_impl.GVR(), channelName),
 		eventshub.InputEvent(ev),
 	))
-
-	f.Requirement("Channel has dead letter sink uri", channel_impl.HasDeadLetterSinkURI(channelName, channel_impl.GVR()))
 
 	f.Assert("Receives dls extensions without errordata", assertEnhancedWithKnativeErrorExtensions(
 		sink,
@@ -454,14 +555,13 @@ func channelSubscriberReturnedErrorWithData(createSubscriberFn func(ref *duckv1.
 	f.Setup("channel is ready", channel_impl.IsReady(channelName))
 	f.Setup("channel is addressable", channel_impl.IsAddressable(channelName))
 	f.Setup("subscription is ready", subscription.IsReady(sub))
+	f.Setup("channel has dead letter sink uri", channel_impl.HasDeadLetterSinkURI(channelName, channel_impl.GVR()))
 
 	f.Requirement("install source", eventshub.Install(
 		sourceName,
 		eventshub.StartSenderToResource(channel_impl.GVR(), channelName),
 		eventshub.InputEvent(ev),
 	))
-
-	f.Requirement("Channel has dead letter sink uri", channel_impl.HasDeadLetterSinkURI(channelName, channel_impl.GVR()))
 
 	f.Assert("Receives dls extensions with errordata Base64encoding", assertEnhancedWithKnativeErrorExtensions(
 		sink,
@@ -487,6 +587,7 @@ func assertEnhancedWithKnativeErrorExtensions(sinkName string, matcherfns ...fun
 			matchers[i] = fn(ctx)
 		}
 		_ = eventshub.StoreFromContext(ctx, sinkName).AssertExact(
+			ctx,
 			t,
 			1,
 			assert.MatchKind(eventshub.EventReceived),

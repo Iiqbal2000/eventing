@@ -4,7 +4,7 @@ This doc explains how to setup a development environment so you can get started
 [contributing](https://www.knative.dev/contributing/) to `Knative Eventing`.
 Also take a look at:
 
-- [The pull request workflow](https://www.knative.dev/contributing/contributing/#pull-requests)
+- [The pull request workflow](https://knative.dev/docs/community/contributing/)
 - [Quick full build and install](#quick-full-build-and-install)
 - [How to add and run tests](./test/README.md)
 - [Iterating](#iterating)
@@ -12,7 +12,7 @@ Also take a look at:
 ## Getting started
 
 1. [Create and checkout a repo fork](#checkout-your-fork)
-2. [Make sure all the requirements are fullfilled](#requirements)
+2. [Make sure all the requirements are fulfilled](#requirements)
 3. [Create a cluster and Linux Container repo](#create-a-cluster-and-a-repo)
 4. [Set up the environment variables](#setup-your-environment)
 5. [Start eventing controller](#starting-eventing-controller)
@@ -42,6 +42,7 @@ You must install these tools:
    default bash is too old, you can use [Homebrew](https://brew.sh) to install a
    later version. For running some automations, such as dependencies updates and
    code generators.
+1. [`helm`](https://helm.sh/docs/intro/install/): v3.14 or higher for Kubernetes package managing.
 
 ### Create a cluster and a repo
 
@@ -83,6 +84,8 @@ export GOPATH="$HOME/go"
 export PATH="${PATH}:${GOPATH}/bin"
 export KO_DOCKER_REPO='gcr.io/my-gcloud-project-id'
 ```
+
+> :information_source: You can use the command `export KO_DEFAULTPLATFORMS=linux/amd64, arm64` to set the correct architecture according to your local machine.
 
 ### Checkout your fork
 
@@ -127,6 +130,8 @@ follow:
 ```shell
 KO_FLAGS=--platform="linux/amd64" ./hack/install.sh
 ```
+
+> :information_source: If you are getting the error `No resources found in cert-manager namespace`, you need to install [cert-manager](https://cert-manager.io/docs/installation/) manually before running the quick full build and install command.
 
 ## Starting Eventing Controller
 
@@ -197,6 +202,34 @@ to explicitly enable it.
 ```shell
 ko apply -f test/config/sugar.yaml
 ```
+
+## Running a Single Rekt Test with e2e-debug.sh
+
+To run a single rekt test using the `e2e-debug.sh` script, follow these instructions:
+
+1. Navigate to the project root directory.
+
+2. Execute the following command in your terminal:
+
+    ```bash
+    ./hack/e2e-debug.sh <test_name> <test_dir>
+    ```
+
+    Replace `<test_name>` with the name of the rekt test you want to run, and `<test_dir>` with the directory containing the test file.
+
+    **Example:**
+
+    ```bash
+    ./hack/e2e-debug.sh TestPingSourceWithSinkRef ./test/rekt
+    ```
+
+    This will run the specified rekt test (`TestMyRektScenario` in this case) from the provided directory (`test/rekt/scenarios`).
+
+    **Note:** Ensure that you have the necessary dependencies and configurations set up before running the test.
+
+3. The script will wait for Knative Eventing components to come up and then execute the specified test. If any failures occur during the test, relevant error messages will be displayed in the terminal.
+
+   **Important:** Make sure to provide a valid test name and test directory. The `<test_name>` parameter technically accepts a regex pattern, but in most cases, you can use the name of the test you want to run. If you wish, you can explore advanced use cases with regex patterns for more granular test selection.
 
 ## Iterating
 
@@ -452,3 +485,10 @@ telepresence quit
 - Networking works fine, but volumes (i.e. being able to access Kubernetes
   volumes from local controller) are not tested
 - This method can also be used in production, but proceed with caution.
+
+### Common issues when setting up with Ubuntu (WSL)
+
+- Go version mismatch: `sudo apt-get install golang-go` installs an older version of Go (1.18), which is too outdated for installing Ko and Kubectl
+   - Use [this method](https://www.digitalocean.com/community/tutorials/how-to-install-go-on-ubuntu-20-04) instead to manually install go using the .tar file
+- Use `go install` to install any additional gotools such as `goimports`
+

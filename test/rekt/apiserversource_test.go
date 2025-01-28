@@ -8,7 +8,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -109,7 +109,8 @@ func TestApiServerSourceDataPlaneTLS(t *testing.T) {
 		eventshub.WithTLS(t),
 	)
 
-	env.Test(ctx, t, apiserversourcefeatures.SendsEventsWithTLS())
+	env.ParallelTest(ctx, t, apiserversourcefeatures.SendsEventsWithTLS())
+	env.ParallelTest(ctx, t, apiserversourcefeatures.SendsEventsWithTLSTrustBundle())
 }
 
 func TestApiServerSourceDataPlane_EventModes(t *testing.T) {
@@ -180,4 +181,48 @@ func TestApiServerSourceDataPlane_MultipleNamespacesEmptySelector(t *testing.T) 
 	)
 
 	env.Test(ctx, t, apiserversourcefeatures.SendsEventsForAllResourcesWithEmptyNamespaceSelector())
+}
+
+func TestApiserversourceSendEventWithJWTOIDC(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		eventshub.WithTLS(t),
+	)
+
+	env.Test(ctx, t, apiserversourcefeatures.ApiserversourceSendEventWithJWT())
+}
+
+func TestApiServerSourceDeployment(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		environment.WithPollTimings(5*time.Second, 2*time.Minute),
+	)
+
+	env.Test(ctx, t, apiserversourcefeatures.DeployAPIServerSourceWithNodeSelector())
+}
+
+func TestApiServerSourceNewFiltersFeature(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+	)
+
+	env.TestSet(ctx, t, apiserversourcefeatures.NewFiltersFeature())
 }

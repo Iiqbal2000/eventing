@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,7 @@ import (
 	"github.com/kelseyhightower/envconfig"
 	"knative.dev/pkg/kmeta"
 
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/channel/multichannelfanout"
 	"knative.dev/eventing/pkg/eventingtls"
 	"knative.dev/eventing/pkg/kncloudevents"
@@ -37,6 +38,7 @@ import (
 	"knative.dev/pkg/logging"
 
 	"go.uber.org/zap"
+	filteredconfigmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/filtered"
 	"knative.dev/pkg/configmap"
 	configmapinformer "knative.dev/pkg/configmap/informer"
 	"knative.dev/pkg/controller"
@@ -45,16 +47,18 @@ import (
 	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
 
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
+	secretinformer "knative.dev/pkg/injection/clients/namespacedkube/informers/core/v1/secret"
+
 	"knative.dev/eventing/pkg/apis/eventing"
 	"knative.dev/eventing/pkg/apis/feature"
 	"knative.dev/eventing/pkg/channel"
 	eventingclient "knative.dev/eventing/pkg/client/injection/client"
-	eventtypeinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1beta2/eventtype"
+	eventpolicyinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy"
+	eventtypeinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1beta3/eventtype"
 	inmemorychannelinformer "knative.dev/eventing/pkg/client/injection/informers/messaging/v1/inmemorychannel"
 	inmemorychannelreconciler "knative.dev/eventing/pkg/client/injection/reconciler/messaging/v1/inmemorychannel"
 	"knative.dev/eventing/pkg/inmemorychannel"
-	kubeclient "knative.dev/pkg/client/injection/kube/client"
-	secretinformer "knative.dev/pkg/injection/clients/namespacedkube/informers/core/v1/secret"
 )
 
 const (
@@ -83,6 +87,8 @@ func NewController(
 	cmw configmap.Watcher,
 ) *controller.Impl {
 	logger := logging.FromContext(ctx)
+
+	trustBundleConfigMapLister := filteredconfigmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector).Lister().ConfigMaps(system.Namespace())
 
 	// Setup trace publishing.
 	iw := cmw.(*configmapinformer.InformedWatcher)
@@ -118,17 +124,42 @@ func NewController(
 		chMsgHandler: sh,
 	}
 
+	oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+
+	clientConfig := eventingtls.ClientConfig{
+		TrustBundleConfigMapLister: trustBundleConfigMapLister,
+	}
+
+	var globalResync func(obj interface{})
+
+	featureStore := feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"), func(_ string, _ interface{}) {
+		if globalResync != nil {
+			globalResync(nil)
+		}
+	})
+
+	featureStore.WatchConfigs(cmw)
 	r := &Reconciler{
 		multiChannelEventHandler: sh,
 		reporter:                 reporter,
 		messagingClientSet:       eventingclient.Get(ctx).MessagingV1(),
-		eventingClient:           eventingclient.Get(ctx).EventingV1beta2(),
+		eventingClient:           eventingclient.Get(ctx).EventingV1beta3(),
 		eventTypeLister:          eventtypeinformer.Get(ctx).Lister(),
+		eventDispatcher:          kncloudevents.NewDispatcher(clientConfig, oidcTokenProvider),
+		authVerifier:             auth.NewVerifier(ctx, eventpolicyinformer.Get(ctx).Lister(), trustBundleConfigMapLister, cmw),
+		clientConfig:             clientConfig,
+		inMemoryChannelLister:    inmemorychannelInformer.Lister(),
 	}
 
 	impl := inmemorychannelreconciler.NewImpl(ctx, r, func(impl *controller.Impl) controller.Options {
-		return controller.Options{SkipStatusUpdates: true, FinalizerName: finalizerName}
+		return controller.Options{SkipStatusUpdates: true, FinalizerName: finalizerName, ConfigStore: featureStore}
 	})
+
+	globalResync = func(_ interface{}) {
+		impl.GlobalResync(inmemorychannelInformer.Informer())
+	}
+
+	r.featureStore = featureStore
 
 	// Watch for inmemory channels.
 	inmemorychannelInformer.Informer().AddEventHandler(
@@ -139,13 +170,6 @@ func NewController(
 				UpdateFunc: controller.PassNew(impl.Enqueue),
 				DeleteFunc: r.deleteFunc,
 			}})
-
-	featureStore := feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"), func(name string, value interface{}) {
-		impl.GlobalResync(inmemorychannelInformer.Informer())
-	})
-	featureStore.WatchConfigs(cmw)
-
-	r.featureStore = featureStore
 
 	httpArgs := &inmemorychannel.InMemoryEventDispatcherArgs{
 		Port:         httpPort,

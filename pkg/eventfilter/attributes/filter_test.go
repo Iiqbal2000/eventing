@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -172,6 +172,7 @@ func TestAllSupportedAttributeFieldsV1(t *testing.T) {
 	e.SetDataSchema("wow")
 	e.SetSubject("cool")
 	e.SetDataContentType("cheers;mate")
+	timeBytes, _ := e.Time().MarshalText()
 
 	attributes := map[string]string{
 		"specversion":     e.SpecVersion(),
@@ -179,7 +180,7 @@ func TestAllSupportedAttributeFieldsV1(t *testing.T) {
 		"source":          e.Source(),
 		"subject":         e.Subject(),
 		"id":              e.ID(),
-		"time":            e.Time().String(),
+		"time":            string(timeBytes),
 		"dataschema":      e.DataSchema(),
 		"schemaurl":       e.DataSchema(),
 		"datacontenttype": e.DataContentType(),

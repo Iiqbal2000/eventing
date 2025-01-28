@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,6 +36,7 @@ import (
 
 	"knative.dev/eventing/pkg/apis"
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	messagingv1 "knative.dev/eventing/pkg/apis/messaging/v1"
 	"knative.dev/eventing/pkg/channel"
 	"knative.dev/eventing/pkg/eventtype"
 	"knative.dev/eventing/pkg/kncloudevents"
@@ -46,10 +47,14 @@ const (
 )
 
 type Subscription struct {
-	Subscriber  duckv1.Addressable
-	Reply       *duckv1.Addressable
-	DeadLetter  *duckv1.Addressable
-	RetryConfig *kncloudevents.RetryConfig
+	Subscriber     duckv1.Addressable
+	Reply          *duckv1.Addressable
+	DeadLetter     *duckv1.Addressable
+	RetryConfig    *kncloudevents.RetryConfig
+	ServiceAccount *types.NamespacedName
+	Name           string
+	Namespace      string
+	UID            types.UID
 }
 
 // Config for a fanout.EventHandler.
@@ -57,6 +62,9 @@ type Config struct {
 	Subscriptions []Subscription `json:"subscriptions"`
 	// AsyncHandler controls whether the Subscriptions are called synchronous or asynchronously.
 	// It is expected to be false when used as a sidecar.
+	//
+	// Async handler is subject to event loss since it responds with 200 before forwarding the event
+	// to all subscriptions.
 	AsyncHandler bool `json:"asyncHandler,omitempty"`
 }
 
@@ -81,15 +89,19 @@ type FanoutEventHandler struct {
 
 	receiver *channel.EventReceiver
 
+	eventDispatcher *kncloudevents.Dispatcher
+
 	// TODO: Plumb context through the receiver and dispatcher and use that to store the timeout,
 	// rather than a member variable.
 	timeout time.Duration
 
-	reporter           channel.StatsReporter
-	logger             *zap.Logger
-	eventTypeHandler   *eventtype.EventTypeAutoHandler
-	channelAddressable *duckv1.KReference
-	channelUID         *types.UID
+	reporter         channel.StatsReporter
+	logger           *zap.Logger
+	eventTypeHandler *eventtype.EventTypeAutoHandler
+	channelRef       *duckv1.KReference
+	channelUID       *types.UID
+	hasHttpSubs      bool
+	hasHttpsSubs     bool
 }
 
 // NewFanoutEventHandler creates a new fanout.EventHandler.
@@ -98,21 +110,24 @@ func NewFanoutEventHandler(
 	config Config,
 	reporter channel.StatsReporter,
 	eventTypeHandler *eventtype.EventTypeAutoHandler,
-	channelAddressable *duckv1.KReference,
+	channelRef *duckv1.KReference,
 	channelUID *types.UID,
+	eventDispatcher *kncloudevents.Dispatcher,
 	receiverOpts ...channel.EventReceiverOptions,
 ) (*FanoutEventHandler, error) {
 	handler := &FanoutEventHandler{
-		logger:             logger,
-		timeout:            defaultTimeout,
-		reporter:           reporter,
-		asyncHandler:       config.AsyncHandler,
-		eventTypeHandler:   eventTypeHandler,
-		channelAddressable: channelAddressable,
-		channelUID:         channelUID,
+		logger:           logger,
+		timeout:          defaultTimeout,
+		reporter:         reporter,
+		asyncHandler:     config.AsyncHandler,
+		eventTypeHandler: eventTypeHandler,
+		channelRef:       channelRef,
+		channelUID:       channelUID,
+		eventDispatcher:  eventDispatcher,
 	}
-	handler.subscriptions = make([]Subscription, len(config.Subscriptions))
-	copy(handler.subscriptions, config.Subscriptions)
+
+	handler.SetSubscriptions(context.Background(), config.Subscriptions)
+
 	// The receiver function needs to point back at the handler itself, so set it up after
 	// initialization.
 	receiver, err := channel.NewEventReceiver(createEventReceiverFunction(handler), logger, reporter, receiverOpts...)
@@ -126,15 +141,17 @@ func NewFanoutEventHandler(
 
 func SubscriberSpecToFanoutConfig(sub eventingduckv1.SubscriberSpec) (*Subscription, error) {
 	destination := duckv1.Addressable{
-		URL:     sub.SubscriberURI,
-		CACerts: sub.SubscriberCACerts,
+		URL:      sub.SubscriberURI,
+		CACerts:  sub.SubscriberCACerts,
+		Audience: sub.SubscriberAudience,
 	}
 
 	var reply *duckv1.Addressable
 	if sub.ReplyURI != nil {
 		reply = &duckv1.Addressable{
-			URL:     sub.ReplyURI,
-			CACerts: sub.ReplyCACerts,
+			URL:      sub.ReplyURI,
+			CACerts:  sub.ReplyCACerts,
+			Audience: sub.ReplyAudience,
 		}
 	}
 
@@ -142,8 +159,9 @@ func SubscriberSpecToFanoutConfig(sub eventingduckv1.SubscriberSpec) (*Subscript
 	if sub.Delivery != nil && sub.Delivery.DeadLetterSink != nil && sub.Delivery.DeadLetterSink.URI != nil {
 		// Subscription reconcilers resolves the URI.
 		deadLetter = &duckv1.Addressable{
-			URL:     sub.Delivery.DeadLetterSink.URI,
-			CACerts: sub.Delivery.DeadLetterSink.CACerts,
+			URL:      sub.Delivery.DeadLetterSink.URI,
+			CACerts:  sub.Delivery.DeadLetterSink.CACerts,
+			Audience: sub.Delivery.DeadLetterSink.Audience,
 		}
 	}
 
@@ -156,7 +174,13 @@ func SubscriberSpecToFanoutConfig(sub eventingduckv1.SubscriberSpec) (*Subscript
 		}
 	}
 
-	return &Subscription{Subscriber: destination, Reply: reply, DeadLetter: deadLetter, RetryConfig: retryConfig}, nil
+	s := &Subscription{Subscriber: destination, Reply: reply, DeadLetter: deadLetter, RetryConfig: retryConfig, UID: sub.UID}
+
+	if sub.Name != nil {
+		s.Name = *sub.Name
+	}
+
+	return s, nil
 }
 
 func (f *FanoutEventHandler) SetSubscriptions(ctx context.Context, subs []Subscription) {
@@ -165,6 +189,14 @@ func (f *FanoutEventHandler) SetSubscriptions(ctx context.Context, subs []Subscr
 	s := make([]Subscription, len(subs))
 	copy(s, subs)
 	f.subscriptions = s
+
+	for _, sub := range f.subscriptions {
+		if sub.Subscriber.URL != nil && sub.Subscriber.URL.Scheme == "https" {
+			f.hasHttpsSubs = true
+		} else {
+			f.hasHttpSubs = true
+		}
+	}
 }
 
 func (f *FanoutEventHandler) GetSubscriptions(ctx context.Context) []Subscription {
@@ -176,7 +208,7 @@ func (f *FanoutEventHandler) GetSubscriptions(ctx context.Context) []Subscriptio
 }
 
 func (f *FanoutEventHandler) autoCreateEventType(ctx context.Context, evnt event.Event) {
-	if f.channelAddressable == nil {
+	if f.channelRef == nil {
 		f.logger.Warn("No addressable for channel")
 		return
 	} else {
@@ -184,11 +216,7 @@ func (f *FanoutEventHandler) autoCreateEventType(ctx context.Context, evnt event
 			f.logger.Warn("No channelUID provided, unable to autocreate event type")
 			return
 		}
-		err := f.eventTypeHandler.AutoCreateEventType(ctx, &evnt, f.channelAddressable, *f.channelUID)
-		if err != nil {
-			f.logger.Warn("EventTypeCreate failed")
-			return
-		}
+		f.eventTypeHandler.AutoCreateEventType(ctx, &evnt, f.channelRef, *f.channelUID)
 	}
 }
 
@@ -200,25 +228,20 @@ func createEventReceiverFunction(f *FanoutEventHandler) func(context.Context, ch
 			}
 
 			subs := f.GetSubscriptions(ctx)
-
 			if len(subs) == 0 {
 				// Nothing to do here
 				return nil
 			}
 
 			parentSpan := trace.FromContext(ctx)
-			reportArgs := channel.ReportArgs{}
-			reportArgs.EventType = evnt.Type()
-			reportArgs.Ns = ref.Namespace
 
-			go func(e event.Event, h nethttp.Header, s *trace.Span, r *channel.StatsReporter, args *channel.ReportArgs) {
+			go func(e event.Event, h nethttp.Header, s *trace.Span) {
 				// Run async dispatch with background context.
 				ctx = trace.NewContext(context.Background(), s)
-				h.Set(apis.KnNamespaceHeader, ref.Namespace)
 				// Any returned error is already logged in f.dispatch().
-				dispatchResultForFanout := f.dispatch(ctx, subs, e, h)
-				_ = ParseDispatchResultAndReportMetrics(dispatchResultForFanout, *r, *args)
-			}(evnt, additionalHeaders, parentSpan, &f.reporter, &reportArgs)
+				_ = f.dispatch(ctx, subs, e, h)
+
+			}(evnt, additionalHeaders, parentSpan)
 			return nil
 		}
 	}
@@ -233,11 +256,9 @@ func createEventReceiverFunction(f *FanoutEventHandler) func(context.Context, ch
 			return nil
 		}
 
-		reportArgs := channel.ReportArgs{}
-		reportArgs.EventType = event.Type()
-		reportArgs.Ns = ref.Namespace
+		// Any returned error is already logged in f.dispatch().
 		dispatchResultForFanout := f.dispatch(ctx, subs, event, additionalHeaders)
-		return ParseDispatchResultAndReportMetrics(dispatchResultForFanout, f.reporter, reportArgs)
+		return dispatchResultForFanout.err
 	}
 }
 
@@ -245,7 +266,7 @@ func (f *FanoutEventHandler) ServeHTTP(response nethttp.ResponseWriter, request 
 	f.receiver.ServeHTTP(response, request)
 }
 
-// ParseDispatchResultAndReportMetric processes the dispatch result and records the related channel metrics with the appropriate context
+// ParseDispatchResultAndReportMetrics processes the dispatch result and records the related channel metrics with the appropriate context
 func ParseDispatchResultAndReportMetrics(result DispatchResult, reporter channel.StatsReporter, reportArgs channel.ReportArgs) error {
 	if result.info != nil && result.info.Duration > kncloudevents.NoDuration {
 		if result.info.ResponseCode > kncloudevents.NoResponse {
@@ -266,11 +287,22 @@ func ParseDispatchResultAndReportMetrics(result DispatchResult, reporter channel
 // dispatch takes the event, fans it out to each subscription in subs. If all the fanned out
 // events return successfully, then return nil. Else, return an error.
 func (f *FanoutEventHandler) dispatch(ctx context.Context, subs []Subscription, event event.Event, additionalHeaders nethttp.Header) DispatchResult {
-	errorCh := make(chan DispatchResult, len(subs))
+	results := make(chan DispatchResult, len(subs))
 	for _, sub := range subs {
 		go func(s Subscription) {
-			dispatchedResultPerSub, err := f.makeFanoutRequest(ctx, event, additionalHeaders, s)
-			errorCh <- DispatchResult{err: err, info: dispatchedResultPerSub}
+			h := additionalHeaders.Clone()
+			h.Set(apis.KnNamespaceHeader, s.Namespace)
+
+			dispatchedResultPerSub, err := f.makeFanoutRequest(ctx, event, h, s)
+			r := DispatchResult{err: err, info: dispatchedResultPerSub}
+			results <- r
+
+			args := channel.ReportArgs{
+				Ns:          s.Namespace,
+				EventType:   event.Type(),
+				EventScheme: r.info.Scheme,
+			}
+			_ = ParseDispatchResultAndReportMetrics(r, f.reporter, args)
 		}(sub)
 	}
 
@@ -283,7 +315,7 @@ func (f *FanoutEventHandler) dispatch(ctx context.Context, subs []Subscription, 
 	}
 	for range subs {
 		select {
-		case dispatchResult := <-errorCh:
+		case dispatchResult := <-results:
 			if dispatchResult.info != nil {
 				if dispatchResult.info.Duration > kncloudevents.NoDuration {
 					if totalDispatchTimeForFanout > kncloudevents.NoDuration {
@@ -298,7 +330,6 @@ func (f *FanoutEventHandler) dispatch(ctx context.Context, subs []Subscription, 
 			if dispatchResult.err != nil {
 				f.logger.Error("Fanout had an error", zap.Error(dispatchResult.err))
 				dispatchResultForFanout.err = dispatchResult.err
-				return dispatchResultForFanout
 			}
 		case <-time.After(f.timeout):
 			f.logger.Error("Fanout timed out")
@@ -313,11 +344,31 @@ func (f *FanoutEventHandler) dispatch(ctx context.Context, subs []Subscription, 
 // makeFanoutRequest sends the request to exactly one subscription. It handles both the `call` and
 // the `sink` portions of the subscription.
 func (f *FanoutEventHandler) makeFanoutRequest(ctx context.Context, event event.Event, additionalHeaders nethttp.Header, sub Subscription) (*kncloudevents.DispatchInfo, error) {
-	return kncloudevents.SendEvent(ctx, event, sub.Subscriber,
+	dispatchOptions := []kncloudevents.SendOption{
 		kncloudevents.WithHeader(additionalHeaders),
 		kncloudevents.WithReply(sub.Reply),
 		kncloudevents.WithDeadLetterSink(sub.DeadLetter),
-		kncloudevents.WithRetryConfig(sub.RetryConfig))
+		kncloudevents.WithRetryConfig(sub.RetryConfig),
+	}
+
+	if f.eventTypeHandler != nil && sub.Name != "" && sub.Namespace != "" && sub.UID != types.UID("") {
+		dispatchOptions = append(dispatchOptions, kncloudevents.WithEventTypeAutoHandler(
+			f.eventTypeHandler,
+			&duckv1.KReference{
+				Name:       sub.Name,
+				Namespace:  sub.Namespace,
+				APIVersion: messagingv1.SchemeGroupVersion.String(),
+				Kind:       "Subscription",
+			},
+			sub.UID,
+		))
+	}
+
+	if sub.ServiceAccount != nil {
+		dispatchOptions = append(dispatchOptions, kncloudevents.WithOIDCAuthentication(sub.ServiceAccount))
+	}
+
+	return f.eventDispatcher.SendEvent(ctx, event, sub.Subscriber, dispatchOptions...)
 }
 
 type DispatchResult struct {

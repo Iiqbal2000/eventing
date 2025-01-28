@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,17 +19,20 @@ package broker
 import (
 	"context"
 
+	"knative.dev/eventing/pkg/auth"
+
 	"go.uber.org/zap"
 	"k8s.io/client-go/tools/cache"
 	"knative.dev/pkg/apis"
 	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap"
-	endpointsinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/endpoints"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/injection/clients/dynamicclient"
 	secretinformer "knative.dev/pkg/injection/clients/namespacedkube/informers/core/v1/secret"
+	namespacedinformerfactory "knative.dev/pkg/injection/clients/namespacedkube/informers/factory"
 	"knative.dev/pkg/logging"
 	pkgreconciler "knative.dev/pkg/reconciler"
+	"knative.dev/pkg/resolver"
 	"knative.dev/pkg/system"
 	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
@@ -40,6 +43,7 @@ import (
 	eventingclient "knative.dev/eventing/pkg/client/injection/client"
 	"knative.dev/eventing/pkg/client/injection/ducks/duck/v1/channelable"
 	brokerinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/broker"
+	eventpolicyinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy"
 	subscriptioninformer "knative.dev/eventing/pkg/client/injection/informers/messaging/v1/subscription"
 	brokerreconciler "knative.dev/eventing/pkg/client/injection/reconciler/eventing/v1/broker"
 	"knative.dev/eventing/pkg/duck"
@@ -65,9 +69,15 @@ func NewController(
 	logger := logging.FromContext(ctx)
 	brokerInformer := brokerinformer.Get(ctx)
 	subscriptionInformer := subscriptioninformer.Get(ctx)
-	endpointsInformer := endpointsinformer.Get(ctx)
+
+	endpointsInformer := namespacedinformerfactory.Get(ctx).Core().V1().Endpoints()
+	if err := controller.StartInformers(ctx.Done(), endpointsInformer.Informer()); err != nil {
+		logger.Fatalw("Failed to start namespaced endpoints informer", zap.Error(err))
+	}
+
 	configmapInformer := configmapinformer.Get(ctx)
 	secretInformer := secretinformer.Get(ctx)
+	eventPolicyInformer := eventpolicyinformer.Get(ctx)
 
 	var globalResync func(obj interface{})
 
@@ -88,6 +98,7 @@ func NewController(
 		BrokerConditionTriggerChannel,
 		BrokerConditionFilter,
 		BrokerConditionAddressable,
+		eventingv1.BrokerConditionEventPoliciesReady,
 	))
 
 	brokerFilter := pkgreconciler.AnnotationFilterFunc(brokerreconciler.ClassAnnotationKey, eventing.MTChannelBrokerClassValue, false /*allowUnset*/)
@@ -100,6 +111,7 @@ func NewController(
 		brokerClass:        eventing.MTChannelBrokerClassValue,
 		configmapLister:    configmapInformer.Lister(),
 		secretLister:       secretInformer.Lister(),
+		eventPolicyLister:  eventPolicyInformer.Lister(),
 	}
 	impl := brokerreconciler.NewImpl(ctx, r, eventing.MTChannelBrokerClassValue, func(impl *controller.Impl) controller.Options {
 		return controller.Options{
@@ -109,6 +121,7 @@ func NewController(
 	})
 
 	r.channelableTracker = duck.NewListableTrackerFromTracker(ctx, channelable.Get, impl.Tracker)
+	r.uriResolver = resolver.NewURIResolverFromTracker(ctx, impl.Tracker)
 
 	brokerInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
 		FilterFunc: brokerFilter,
@@ -142,6 +155,12 @@ func NewController(
 		FilterFunc: controller.FilterWithName(ingressServerTLSSecretName),
 		Handler:    controller.HandleAll(globalResync),
 	})
+
+	brokerGK := eventingv1.SchemeGroupVersion.WithKind("Broker").GroupKind()
+
+	// Enqueue the Broker, if we have an EventPolicy which was referencing
+	// or got updated and now is referencing the Broker
+	eventPolicyInformer.Informer().AddEventHandler(auth.EventPolicyEventHandler(brokerInformer.Informer().GetIndexer(), brokerGK, impl.EnqueueKey))
 
 	return impl
 }

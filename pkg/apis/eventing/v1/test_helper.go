@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -53,6 +53,7 @@ func (testHelper) ReadySubscriptionStatus() *messagingv1.SubscriptionStatus {
 	ss.MarkChannelReady()
 	ss.MarkReferencesResolved()
 	ss.MarkAddedToChannel()
+	ss.MarkOIDCIdentityCreatedSucceeded()
 	return ss
 }
 
@@ -61,8 +62,11 @@ func (t testHelper) ReadyBrokerStatus() *BrokerStatus {
 	bs.PropagateIngressAvailability(t.AvailableEndpoints())
 	bs.PropagateTriggerChannelReadiness(t.ReadyChannelStatus())
 	bs.PropagateFilterAvailability(t.AvailableEndpoints())
-	bs.SetAddress(apis.HTTP("example.com"))
+	bs.SetAddress(&duckv1.Addressable{
+		URL: apis.HTTP("example.com"),
+	})
 	bs.MarkDeadLetterSinkResolvedSucceeded(eventingduckv1.DeliveryStatus{})
+	bs.MarkEventPoliciesTrue()
 	return bs
 }
 
@@ -71,7 +75,10 @@ func (t testHelper) ReadyBrokerStatusWithoutDLS() *BrokerStatus {
 	bs.PropagateIngressAvailability(t.AvailableEndpoints())
 	bs.PropagateTriggerChannelReadiness(t.ReadyChannelStatus())
 	bs.PropagateFilterAvailability(t.AvailableEndpoints())
-	bs.SetAddress(apis.HTTP("example.com"))
+	bs.SetAddress(&duckv1.Addressable{
+		URL: apis.HTTP("example.com"),
+	})
+	bs.MarkEventPoliciesTrue()
 	bs.MarkDeadLetterSinkNotConfigured()
 	return bs
 }

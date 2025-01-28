@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,11 +35,17 @@ import (
 	"knative.dev/pkg/logging"
 	pkgreconciler "knative.dev/pkg/reconciler"
 
+	"knative.dev/pkg/kmp"
+
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	"knative.dev/eventing/pkg/apis/feature"
 	v1 "knative.dev/eventing/pkg/apis/flows/v1"
 	messagingv1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/auth"
 	clientset "knative.dev/eventing/pkg/client/clientset/versioned"
 	sequencereconciler "knative.dev/eventing/pkg/client/injection/reconciler/flows/v1/sequence"
+	eventingv1alpha1listers "knative.dev/eventing/pkg/client/listers/eventing/v1alpha1"
 	listers "knative.dev/eventing/pkg/client/listers/flows/v1"
 	messaginglisters "knative.dev/eventing/pkg/client/listers/messaging/v1"
 	"knative.dev/eventing/pkg/duck"
@@ -58,6 +64,8 @@ type Reconciler struct {
 
 	// dynamicClientSet allows us to configure pluggable Build objects
 	dynamicClientSet dynamic.Interface
+
+	eventPolicyLister eventingv1alpha1listers.EventPolicyLister
 }
 
 // Check that our Reconciler implements sequencereconciler.Interface
@@ -73,6 +81,8 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, s *v1.Sequence) pkgrecon
 	//    than channel, we could just (optionally) feed it directly to the following subscription.
 	// 3. Rinse and repeat step #2 above for each Step in the list
 	// 4. If there's a Reply, then the last Subscription will be configured to send the reply to that.
+
+	featureFlags := feature.FromContext(ctx)
 
 	gvr, _ := meta.UnsafeGuessKindToResource(s.Spec.ChannelTemplate.GetObjectKind().GroupVersionKind())
 	channelResourceInterface := r.dynamicClientSet.Resource(gvr).Namespace(s.Namespace)
@@ -120,6 +130,15 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, s *v1.Sequence) pkgrecon
 	// leftover channels and subscriptions that need to be removed.
 	if err := r.removeUnwantedChannels(ctx, channelResourceInterface, s, channels); err != nil {
 		return err
+	}
+
+	if err := r.reconcileEventPolicies(ctx, s, channels, subs, featureFlags); err != nil {
+		return fmt.Errorf("failed to reconcile EventPolicies: %w", err)
+	}
+
+	err := auth.UpdateStatusWithEventPolicies(featureFlags, &s.Status.AppliedEventPoliciesStatus, &s.Status, r.eventPolicyLister, v1.SchemeGroupVersion.WithKind("Sequence"), s.ObjectMeta)
+	if err != nil {
+		return fmt.Errorf("could not update Sequence status with EventPolicies: %v", err)
 	}
 
 	return r.removeUnwantedSubscriptions(ctx, s, subs)
@@ -190,7 +209,7 @@ func (r *Reconciler) reconcileSubscription(ctx context.Context, step int, p *v1.
 		// TODO: Send events here, or elsewhere?
 		//r.Recorder.Eventf(p, corev1.EventTypeWarning, subscriptionCreateFailed, "Create Sequences's subscription failed: %v", err)
 		return nil, fmt.Errorf("failed to get subscription: %s", err)
-	} else if !equality.Semantic.DeepDerivative(expected.Spec, sub.Spec) {
+	} else if immutableFieldsChanged := expected.CheckImmutableFields(ctx, sub); immutableFieldsChanged != nil {
 		// Given that spec.channel is immutable, we cannot just update the subscription. We delete
 		// it instead, and re-create it.
 		err = r.eventingClientSet.MessagingV1().Subscriptions(sub.Namespace).Delete(ctx, sub.Name, metav1.DeleteOptions{})
@@ -204,6 +223,15 @@ func (r *Reconciler) reconcileSubscription(ctx context.Context, step int, p *v1.
 			return nil, err
 		}
 		return newSub, nil
+	} else if equal, err := kmp.SafeEqual(sub.Spec, expected.Spec); !equal || err != nil {
+		expected.ResourceVersion = sub.ResourceVersion
+		// only the mutable fields were changed, so we can update the subscription
+		updatedSub, err := r.eventingClientSet.MessagingV1().Subscriptions(sub.Namespace).Update(ctx, expected, metav1.UpdateOptions{})
+		if err != nil {
+			logging.FromContext(ctx).Infow("Cannot update subscription", zap.Error(err))
+			return nil, err
+		}
+		return updatedSub, nil
 	}
 	return sub, nil
 }
@@ -310,4 +338,146 @@ func (r *Reconciler) removeUnwantedSubscriptions(ctx context.Context, seq *v1.Se
 	}
 
 	return nil
+}
+
+func (r *Reconciler) reconcileEventPolicies(ctx context.Context, s *v1.Sequence, channels []*eventingduckv1.Channelable, subs []*messagingv1.Subscription, featureFlags feature.Flags) error {
+	if !featureFlags.IsOIDCAuthentication() {
+		return r.cleanupAllEventPolicies(ctx, s)
+	}
+
+	existingPolicies, err := r.listEventPoliciesForSequence(s)
+	if err != nil {
+		return fmt.Errorf("failed to list existing EventPolicies: %w", err)
+	}
+
+	// Prepare maps for efficient lookups, updates, and deletions of policies
+	existingPolicyMap := make(map[string]*eventingv1alpha1.EventPolicy)
+	for _, policy := range existingPolicies {
+		existingPolicyMap[policy.Name] = policy
+	}
+
+	// Prepare lists for different actions so that policies can be categorized
+	var policiesToUpdate, policiesToCreate []*eventingv1alpha1.EventPolicy
+	policiesToDelete := make([]*eventingv1alpha1.EventPolicy, 0, len(existingPolicies))
+
+	// Handle intermediate channel policies (skip the first channel as it's the input channel!)
+	for i := 1; i < len(channels); i++ {
+		expectedPolicy := resources.MakeEventPolicyForSequenceChannel(s, channels[i], subs[i-1])
+		existingPolicy, exists := existingPolicyMap[expectedPolicy.Name]
+
+		if exists {
+			if !equality.Semantic.DeepDerivative(expectedPolicy, existingPolicy) {
+				expectedPolicy.SetResourceVersion(existingPolicy.ResourceVersion)
+				policiesToUpdate = append(policiesToUpdate, expectedPolicy)
+			}
+			delete(existingPolicyMap, expectedPolicy.Name)
+		} else {
+			policiesToCreate = append(policiesToCreate, expectedPolicy)
+		}
+	}
+
+	// Handle input channel policies
+	inputPolicies, err := r.prepareInputChannelEventPolicy(s, channels[0])
+	if err != nil {
+		return fmt.Errorf("failed to prepare input channel EventPolicies: %w", err)
+	}
+	for _, inputPolicy := range inputPolicies {
+		existingInputPolicy, exists := existingPolicyMap[inputPolicy.Name]
+		if exists {
+			if !equality.Semantic.DeepDerivative(inputPolicy, existingInputPolicy) {
+				inputPolicy.SetResourceVersion(existingInputPolicy.ResourceVersion)
+				policiesToUpdate = append(policiesToUpdate, inputPolicy)
+			}
+			delete(existingPolicyMap, inputPolicy.Name)
+		} else {
+			policiesToCreate = append(policiesToCreate, inputPolicy)
+		}
+	}
+
+	// Any remaining policies in the map should be deleted
+	for _, policy := range existingPolicyMap {
+		policiesToDelete = append(policiesToDelete, policy)
+	}
+
+	// Perform the actual CRUD operations
+	if err := r.createEventPolicies(ctx, policiesToCreate); err != nil {
+		return fmt.Errorf("failed to create EventPolicies: %w", err)
+	}
+	if err := r.updateEventPolicies(ctx, policiesToUpdate); err != nil {
+		return fmt.Errorf("failed to update EventPolicies: %w", err)
+	}
+	if err := r.deleteEventPolicies(ctx, policiesToDelete); err != nil {
+		return fmt.Errorf("failed to delete EventPolicies: %w", err)
+	}
+
+	return nil
+}
+
+// listEventPoliciesForSequence lists all EventPolicies (e.g. the policies for the input channel and the intermediate channels) created during reconcileKind that are associated with the given Sequence.
+func (r *Reconciler) listEventPoliciesForSequence(s *v1.Sequence) ([]*eventingv1alpha1.EventPolicy, error) {
+	labelSelector := labels.SelectorFromSet(map[string]string{
+		resources.SequenceChannelEventPolicyLabelPrefix + "sequence-name": s.Name,
+	})
+	return r.eventPolicyLister.EventPolicies(s.Namespace).List(labelSelector)
+}
+
+func (r *Reconciler) prepareInputChannelEventPolicy(s *v1.Sequence, inputChannel *eventingduckv1.Channelable) ([]*eventingv1alpha1.EventPolicy, error) {
+	matchingPolicies, err := auth.GetEventPoliciesForResource(
+		r.eventPolicyLister,
+		v1.SchemeGroupVersion.WithKind("Sequence"),
+		s.ObjectMeta,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get matching EventPolicies for Sequence: %w", err)
+	}
+
+	if len(matchingPolicies) == 0 {
+		return nil, nil
+	}
+
+	inputChannelPolicies := make([]*eventingv1alpha1.EventPolicy, 0, len(matchingPolicies))
+	for _, policy := range matchingPolicies {
+		inputChannelPolicy := resources.MakeEventPolicyForSequenceInputChannel(s, inputChannel, policy)
+		inputChannelPolicies = append(inputChannelPolicies, inputChannelPolicy)
+	}
+
+	return inputChannelPolicies, nil
+}
+
+func (r *Reconciler) createEventPolicies(ctx context.Context, policies []*eventingv1alpha1.EventPolicy) error {
+	for _, policy := range policies {
+		_, err := r.eventingClientSet.EventingV1alpha1().EventPolicies(policy.Namespace).Create(ctx, policy, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) updateEventPolicies(ctx context.Context, policies []*eventingv1alpha1.EventPolicy) error {
+	for _, policy := range policies {
+		_, err := r.eventingClientSet.EventingV1alpha1().EventPolicies(policy.Namespace).Update(ctx, policy, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) deleteEventPolicies(ctx context.Context, policies []*eventingv1alpha1.EventPolicy) error {
+	for _, policy := range policies {
+		err := r.eventingClientSet.EventingV1alpha1().EventPolicies(policy.Namespace).Delete(ctx, policy.Name, metav1.DeleteOptions{})
+		if err != nil && !apierrs.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) cleanupAllEventPolicies(ctx context.Context, s *v1.Sequence) error {
+	policies, err := r.listEventPoliciesForSequence(s)
+	if err != nil {
+		return fmt.Errorf("failed to list EventPolicies for cleanup: %w", err)
+	}
+	return r.deleteEventPolicies(ctx, policies)
 }

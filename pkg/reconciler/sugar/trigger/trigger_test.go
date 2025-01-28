@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,6 +19,8 @@ package trigger
 import (
 	"context"
 	"testing"
+
+	duckv1 "knative.dev/pkg/apis/duck/v1"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -70,8 +72,16 @@ func TestEnabled(t *testing.T) {
 	// Context with DefaultConfig
 	c := config.Config{
 		Defaults: &config.Defaults{
-			ClusterDefault: &config.ClassAndBrokerConfig{
-				BrokerClass: "AValidBrokerClass",
+			ClusterDefaultConfig: &config.DefaultConfig{
+				DefaultBrokerClass: "AValidBrokerClass",
+				BrokerConfig: &config.BrokerConfig{
+					KReference: &duckv1.KReference{
+						Name:       "default-broker-config",
+						Kind:       "ConfigMap",
+						Namespace:  testNS,
+						APIVersion: "v1",
+					},
+				},
 			},
 		},
 	}

@@ -102,8 +102,10 @@ type BaseReconciler struct {
 }
 
 // Check that our Reconciler implements controller.Reconciler
-var _ controller.Reconciler = (*BaseReconciler)(nil)
-var _ pkgreconciler.LeaderAware = (*BaseReconciler)(nil)
+var (
+	_ controller.Reconciler     = (*BaseReconciler)(nil)
+	_ pkgreconciler.LeaderAware = (*BaseReconciler)(nil)
+)
 
 // Reconcile implements controller.Reconciler
 func (r *BaseReconciler) Reconcile(ctx context.Context, key string) error {
@@ -111,7 +113,7 @@ func (r *BaseReconciler) Reconcile(ctx context.Context, key string) error {
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		logging.FromContext(ctx).Error("invalid resource key: ", key)
-		return nil
+		return nil //nolint:nilerr
 	}
 
 	// Only the leader should reconcile binding resources.
@@ -229,7 +231,7 @@ func (r *BaseReconciler) IsFinalizing(ctx context.Context, fb kmeta.Accessor) bo
 // form of this BaseReconciler's GVR's stringified GroupResource.
 func (r *BaseReconciler) EnsureFinalizer(ctx context.Context, fb kmeta.Accessor) error {
 	// If it has the finalizer, then we're done.
-	finalizers := sets.NewString(fb.GetFinalizers()...)
+	finalizers := sets.New[string](fb.GetFinalizers()...)
 	if finalizers.Has(r.GVR.GroupResource().String()) {
 		return nil
 	}
@@ -275,7 +277,6 @@ func (r *BaseReconciler) RemoveFinalizer(ctx context.Context, fb kmeta.Accessor)
 }
 
 func (r *BaseReconciler) labelNamespace(ctx context.Context, subject tracker.Reference) error {
-
 	namespaceObject, err := r.NamespaceLister.Get(subject.Namespace)
 	if apierrs.IsNotFound(err) {
 		logging.FromContext(ctx).Info("Error getting namespace (not found): ", err)
@@ -390,7 +391,6 @@ func (r *BaseReconciler) ReconcileSubject(ctx context.Context, fb Bindable, muta
 	// For each of the referents, apply the mutation.
 	eg := errgroup.Group{}
 	for _, ps := range referents {
-		ps := ps
 		eg.Go(func() error {
 			// Do the binding to the pod specable.
 			orig := ps.DeepCopy()

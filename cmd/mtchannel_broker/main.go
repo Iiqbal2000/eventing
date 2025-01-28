@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,7 +22,11 @@ import (
 
 	"context"
 
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/pkg/injection/sharedmain"
+
+	filteredFactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
+	"knative.dev/pkg/signals"
 
 	"knative.dev/eventing/pkg/reconciler/broker"
 	mttrigger "knative.dev/eventing/pkg/reconciler/broker/trigger"
@@ -33,7 +37,12 @@ const (
 )
 
 func main() {
-	sharedmain.Main(
+	ctx := signals.NewContext()
+
+	ctx = filteredFactory.WithSelectors(ctx,
+		auth.OIDCLabelSelector)
+
+	sharedmain.MainWithContext(ctx,
 		component,
 
 		broker.NewController,

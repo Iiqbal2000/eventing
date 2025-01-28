@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -475,6 +475,30 @@ func TestTriggerSpecValidation(t *testing.T) {
 			},
 		},
 		want: apis.ErrInvalidValue(invalidString, "delivery.backoffDelay"),
+	}, {
+		name: "empty Broker and empty BrokerRef",
+		ts: &TriggerSpec{
+			Broker:     "",
+			BrokerRef:  nil,
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: apis.ErrMissingField("broker"),
+	}, {
+		name: "BrokerRef has different namespace",
+		ts: &TriggerSpec{
+			BrokerRef: &duckv1.KReference{
+				Name:      "test-broker",
+				Namespace: "test-broker-ns",
+			},
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: func() *apis.FieldError {
+			fe := apis.ErrDisallowedFields("namespace")
+			fe.Details = "only name, apiVersion and kind are supported fields when feature.CrossNamespaceEventLinks is disabled"
+			return fe
+		}(),
 	}}
 
 	for _, test := range tests {
@@ -487,10 +511,187 @@ func TestTriggerSpecValidation(t *testing.T) {
 	}
 }
 
+func TestTriggerSpecValidationWithCrossNamespaceEventLinksFeatureEnabled(t *testing.T) {
+	invalidString := "invalid time"
+	tests := []struct {
+		name string
+		ts   *TriggerSpec
+		want *apis.FieldError
+	}{{
+		name: "invalid trigger spec",
+		ts:   &TriggerSpec{},
+		want: func() *apis.FieldError {
+			var errs *apis.FieldError
+			fe := apis.ErrMissingField("broker")
+			errs = errs.Also(fe)
+			fe = apis.ErrGeneric("expected at least one, got none", "subscriber.ref", "subscriber.uri")
+			errs = errs.Also(fe)
+			return errs
+		}(),
+	}, {
+		name: "missing broker",
+		ts: &TriggerSpec{
+			Broker:     "",
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: func() *apis.FieldError {
+			fe := apis.ErrMissingField("broker")
+			return fe
+		}(),
+	}, {
+		name: "missing attributes keys, match all",
+		ts: &TriggerSpec{
+			Broker:     "test_broker",
+			Filter:     validEmptyTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: &apis.FieldError{},
+	}, {
+		name: "invalid attribute name, start with number",
+		ts: &TriggerSpec{
+			Broker: "test_broker",
+			Filter: newTriggerFilter(
+				map[string]string{
+					"0invalid": "my-value",
+				}),
+			Subscriber: validSubscriber,
+		},
+		want: apis.ErrInvalidKeyName("0invalid", apis.CurrentField,
+			"Attribute name must start with a letter and can only contain "+
+				"lowercase alphanumeric").ViaFieldKey("attributes", "0invalid").ViaField("filter"),
+	}, {
+		name: "invalid attribute name, capital letters",
+		ts: &TriggerSpec{
+			Broker: "test_broker",
+			Filter: newTriggerFilter(
+				map[string]string{
+					"invALID": "my-value",
+				}),
+			Subscriber: validSubscriber,
+		},
+		want: apis.ErrInvalidKeyName("invALID", apis.CurrentField,
+			"Attribute name must start with a letter and can only contain "+
+				"lowercase alphanumeric").ViaFieldKey("attributes", "invALID").ViaField("filter"),
+	}, {
+		name: "missing subscriber",
+		ts: &TriggerSpec{
+			Broker: "test_broker",
+			Filter: validTriggerFilter,
+		},
+		want: apis.ErrGeneric("expected at least one, got none", "subscriber.ref", "subscriber.uri"),
+	}, {
+		name: "missing subscriber.ref.name",
+		ts: &TriggerSpec{
+			Broker:     "test_broker",
+			Filter:     validTriggerFilter,
+			Subscriber: invalidSubscriber,
+		},
+		want: apis.ErrMissingField("subscriber.ref.name"),
+	}, {
+		name: "missing broker",
+		ts: &TriggerSpec{
+			Broker:     "",
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: apis.ErrMissingField("broker"),
+	}, {
+		name: "valid empty filter",
+		ts: &TriggerSpec{
+			Broker:     "test_broker",
+			Filter:     validEmptyTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: &apis.FieldError{},
+	}, {
+		name: "valid SourceAndType filter",
+		ts: &TriggerSpec{
+			Broker:     "test_broker",
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: &apis.FieldError{},
+	}, {
+		name: "valid Attributes filter",
+		ts: &TriggerSpec{
+			Broker:     "test_broker",
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: &apis.FieldError{},
+	}, {
+		name: "invalid delivery, invalid delay string",
+		ts: &TriggerSpec{
+			Broker:     "test_broker",
+			Filter:     validEmptyTriggerFilter,
+			Subscriber: validSubscriber,
+			Delivery: &eventingduckv1.DeliverySpec{
+				BackoffDelay: &invalidString,
+			},
+		},
+		want: apis.ErrInvalidValue(invalidString, "delivery.backoffDelay"),
+	}, {
+		name: "using BrokerRef",
+		ts: &TriggerSpec{
+			BrokerRef: &duckv1.KReference{
+				Name:      "test-broker",
+				Namespace: "test-broker-ns",
+			},
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: nil,
+	}, {
+		name: "non-empty Broker but empty BrokerRef",
+		ts: &TriggerSpec{
+			BrokerRef: &duckv1.KReference{
+				Name:      "test-broker",
+				Namespace: "test-broker-ns",
+			},
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: nil,
+	}, {
+		name: "empty Broker but non-empty BrokerRef",
+		ts: &TriggerSpec{
+			BrokerRef: &duckv1.KReference{
+				Name:      "test-broker",
+				Namespace: "test-broker-ns",
+			},
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: nil,
+	}, {
+		name: "non-empty Broker and BrokerRef",
+		ts: &TriggerSpec{
+			Broker: "test-broker",
+			BrokerRef: &duckv1.KReference{
+				Name:      "test-broker",
+				Namespace: "test-broker-ns",
+			},
+			Filter:     validTriggerFilter,
+			Subscriber: validSubscriber,
+		},
+		want: apis.ErrMultipleOneOf("broker", "brokerRef"),
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := feature.ToContext(context.TODO(), feature.Flags{
+				feature.CrossNamespaceEventLinks: feature.Enabled,
+			})
+			got := test.ts.Validate(ctx)
+			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
+				t.Errorf("Validate TriggerSpec (-want, +got) =\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestFilterSpecValidation(t *testing.T) {
-	newTriggerFiltersEnabledCtx := feature.ToContext(context.TODO(), feature.Flags{
-		feature.NewTriggerFilters: feature.Enabled,
-	})
 	tests := []struct {
 		name    string
 		filter  *TriggerFilter
@@ -717,7 +918,7 @@ func TestFilterSpecValidation(t *testing.T) {
 			{
 				CESQL: "this is wrong",
 			}},
-		want: apis.ErrInvalidValue("this is wrong", "cesql", "syntax error: ").ViaFieldIndex("filters", 0),
+		want: apis.ErrInvalidValue("this is wrong", "cesql", "parse error: syntax error: ").ViaFieldIndex("filters", 0),
 	}, {
 		name: "Valid CE SQL expression",
 		filters: []SubscriptionsAPIFilter{
@@ -735,7 +936,7 @@ func TestFilterSpecValidation(t *testing.T) {
 				Filters:    test.filters,
 				Subscriber: validSubscriber,
 			}
-			got := ts.Validate(newTriggerFiltersEnabledCtx)
+			got := ts.Validate(context.Background())
 			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
 				t.Errorf("Validate TriggerSpec (-want, +got) =\n%s", diff)
 			}

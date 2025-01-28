@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,11 @@ package mttrigger
 
 import (
 	"context"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"knative.dev/eventing/pkg/auth"
 
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/labels"
@@ -43,6 +48,9 @@ import (
 	triggerreconciler "knative.dev/eventing/pkg/client/injection/reconciler/eventing/v1/trigger"
 	eventinglisters "knative.dev/eventing/pkg/client/listers/eventing/v1"
 	"knative.dev/eventing/pkg/duck"
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
+
+	serviceaccountinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/serviceaccount/filtered"
 )
 
 // NewController initializes the controller and is called by the generated code
@@ -57,24 +65,27 @@ func NewController(
 	subscriptionInformer := subscriptioninformer.Get(ctx)
 	configmapInformer := configmapinformer.Get(ctx)
 	secretInformer := secretinformer.Get(ctx)
+	oidcServiceaccountInformer := serviceaccountinformer.Get(ctx, auth.OIDCLabelSelector)
 
 	featureStore := feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"))
 	featureStore.WatchConfigs(cmw)
 
 	triggerLister := triggerInformer.Lister()
 	r := &Reconciler{
-		eventingClientSet:  eventingclient.Get(ctx),
-		dynamicClientSet:   dynamicclient.Get(ctx),
-		subscriptionLister: subscriptionInformer.Lister(),
-		brokerLister:       brokerInformer.Lister(),
-		triggerLister:      triggerLister,
-		configmapLister:    configmapInformer.Lister(),
-		secretLister:       secretInformer.Lister(),
+		eventingClientSet:    eventingclient.Get(ctx),
+		dynamicClientSet:     dynamicclient.Get(ctx),
+		kubeclient:           kubeclient.Get(ctx),
+		subscriptionLister:   subscriptionInformer.Lister(),
+		brokerLister:         brokerInformer.Lister(),
+		triggerLister:        triggerLister,
+		configmapLister:      configmapInformer.Lister(),
+		secretLister:         secretInformer.Lister(),
+		serviceAccountLister: oidcServiceaccountInformer.Lister(),
 	}
 	impl := triggerreconciler.NewImpl(ctx, r, func(impl *controller.Impl) controller.Options {
 		return controller.Options{
 			ConfigStore:       featureStore,
-			PromoteFilterFunc: filterTriggers(r.brokerLister),
+			PromoteFilterFunc: filterTriggers(featureStore, r.brokerLister),
 		}
 	})
 	r.impl = impl
@@ -83,7 +94,7 @@ func NewController(
 	r.uriResolver = resolver.NewURIResolverFromTracker(ctx, impl.Tracker)
 
 	triggerInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: filterTriggers(r.brokerLister),
+		FilterFunc: filterTriggers(featureStore, r.brokerLister),
 		Handler:    controller.HandleAll(impl.Enqueue),
 	})
 
@@ -93,7 +104,7 @@ func NewController(
 		FilterFunc: brokerFilter,
 		Handler: controller.HandleAll(func(obj interface{}) {
 			if broker, ok := obj.(*eventing.Broker); ok {
-				for _, t := range getTriggersForBroker(logger, triggerLister, broker) {
+				for _, t := range getTriggersForBroker(logger, triggerLister, broker, featureStore.Load()) {
 					impl.Enqueue(t)
 				}
 			}
@@ -106,19 +117,63 @@ func NewController(
 		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
 	})
 
+	// Reconciler Trigger when the OIDC service account changes
+	oidcServiceaccountInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: filterOIDCServiceAccounts(featureStore, triggerInformer.Lister(), brokerInformer.Lister()),
+		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
+	})
+
 	return impl
+}
+
+// filterOIDCServiceAccounts returns a function that returns true if the resource passed
+// is a service account, which is owned by a trigger pointing to a MTChannelBased broker.
+func filterOIDCServiceAccounts(featureStore *feature.Store, triggerLister eventinglisters.TriggerLister, brokerLister eventinglisters.BrokerLister) func(interface{}) bool {
+	return func(obj interface{}) bool {
+		controlledByTrigger := controller.FilterController(&eventing.Trigger{})(obj)
+		if !controlledByTrigger {
+			return false
+		}
+
+		sa, ok := obj.(*corev1.ServiceAccount)
+		if !ok {
+			return false
+		}
+
+		owner := metav1.GetControllerOf(sa)
+		if owner == nil {
+			return false
+		}
+
+		trigger, err := triggerLister.Triggers(sa.Namespace).Get(owner.Name)
+		if err != nil {
+			return false
+		}
+
+		return filterTriggers(featureStore, brokerLister)(trigger)
+	}
 }
 
 // filterTriggers returns a function that returns true if the resource passed
 // is a trigger pointing to a MTChannelBroker.
-func filterTriggers(lister eventinglisters.BrokerLister) func(interface{}) bool {
+func filterTriggers(featureStore *feature.Store, lister eventinglisters.BrokerLister) func(interface{}) bool {
 	return func(obj interface{}) bool {
 		trigger, ok := obj.(*eventing.Trigger)
 		if !ok {
 			return false
 		}
 
-		b, err := lister.Brokers(trigger.Namespace).Get(trigger.Spec.Broker)
+		var broker string
+		var brokerNamespace string
+		if featureStore.IsEnabled(feature.CrossNamespaceEventLinks) && trigger.Spec.BrokerRef != nil {
+			broker = trigger.Spec.BrokerRef.Name
+			brokerNamespace = trigger.Spec.BrokerRef.Namespace
+		} else {
+			broker = trigger.Spec.Broker
+			brokerNamespace = trigger.Namespace
+		}
+
+		b, err := lister.Brokers(brokerNamespace).Get(broker)
 		if err != nil {
 			return false
 		}
@@ -132,13 +187,20 @@ func filterTriggers(lister eventinglisters.BrokerLister) func(interface{}) bool 
 // the Triggers belonging to it. As there is no way to return failures in the
 // Informers EventHandler, errors are logged, and an empty array is returned in case
 // of failures.
-func getTriggersForBroker(logger *zap.SugaredLogger, triggerLister eventinglisters.TriggerLister, broker *eventing.Broker) []*eventing.Trigger {
+func getTriggersForBroker(logger *zap.SugaredLogger, triggerLister eventinglisters.TriggerLister, broker *eventing.Broker, features feature.Flags) []*eventing.Trigger {
 	r := make([]*eventing.Trigger, 0)
 	selector := labels.SelectorFromSet(map[string]string{apiseventing.BrokerLabelKey: broker.Name})
-	triggers, err := triggerLister.Triggers(broker.Namespace).List(selector)
+	triggers, err := triggerLister.Triggers(metav1.NamespaceAll).List(selector)
 	if err != nil {
 		logger.Warn("Failed to list triggers", zap.Any("broker", broker), zap.Error(err))
 		return r
 	}
-	return append(r, triggers...)
+	for _, t := range triggers {
+		if features.IsCrossNamespaceEventLinks() && t.Spec.BrokerRef != nil && t.Spec.BrokerRef.Namespace == broker.Namespace {
+			r = append(r, t)
+		} else if t.Namespace == broker.Namespace {
+			r = append(r, t)
+		}
+	}
+	return r
 }

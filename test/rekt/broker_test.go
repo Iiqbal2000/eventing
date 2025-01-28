@@ -8,7 +8,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,6 +23,10 @@ import (
 	"testing"
 	"time"
 
+	"knative.dev/eventing/test/rekt/features/authz"
+
+	"knative.dev/reconciler-test/pkg/feature"
+
 	"knative.dev/pkg/system"
 	_ "knative.dev/pkg/system/testing"
 	"knative.dev/reconciler-test/pkg/environment"
@@ -32,7 +36,8 @@ import (
 	"knative.dev/reconciler-test/pkg/tracing"
 
 	"knative.dev/eventing/test/rekt/features/broker"
-	b "knative.dev/eventing/test/rekt/resources/broker"
+	"knative.dev/eventing/test/rekt/features/oidc"
+	brokerresources "knative.dev/eventing/test/rekt/resources/broker"
 )
 
 func TestBrokerWithManyTriggers(t *testing.T) {
@@ -80,7 +85,7 @@ func TestBrokerAsMiddleware(t *testing.T) {
 	)
 
 	// Install and wait for a Ready Broker.
-	env.Prerequisite(ctx, t, broker.GoesReady("default", b.WithEnvConfig()...))
+	env.Prerequisite(ctx, t, broker.GoesReady("default", brokerresources.WithEnvConfig()...))
 
 	// Test that a Broker can act as middleware.
 	env.Test(ctx, t, broker.SourceToSink("default"))
@@ -119,7 +124,7 @@ func TestBrokerWithFlakyDLQ(t *testing.T) {
 	)
 
 	// Install and wait for a Ready Broker.
-	env.Prerequisite(ctx, t, broker.GoesReady("default", b.WithEnvConfig()...))
+	env.Prerequisite(ctx, t, broker.GoesReady("default", brokerresources.WithEnvConfig()...))
 
 	// Test that a Broker can act as middleware.
 	env.Test(ctx, t, broker.SourceToSinkWithFlakyDLQ("default"))
@@ -137,9 +142,9 @@ func TestBrokerConformance(t *testing.T) {
 	)
 
 	// Install and wait for a Ready Broker.
-	env.Prerequisite(ctx, t, broker.GoesReady("default", b.WithEnvConfig()...))
-	env.TestSet(ctx, t, broker.ControlPlaneConformance("default", b.WithEnvConfig()...))
+	env.Prerequisite(ctx, t, broker.GoesReady("default", brokerresources.WithEnvConfig()...))
 	env.TestSet(ctx, t, broker.DataPlaneConformance("default"))
+	env.TestSet(ctx, t, broker.ControlPlaneConformance("default", brokerresources.WithEnvConfig()...))
 }
 
 func TestBrokerDefaultDelivery(t *testing.T) {
@@ -185,6 +190,22 @@ func TestBrokerRedelivery(t *testing.T) {
 	)
 
 	env.TestSet(ctx, t, broker.BrokerRedelivery())
+}
+
+// TestBrokerPropagatesMetadata test Broker reconciler propagates metadata to channel.
+func TestBrokerPropagatesMetadata(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		environment.WithPollTimings(5*time.Second, 4*time.Minute),
+	)
+
+	env.ParallelTest(ctx, t, broker.PropagatesMetadata())
 }
 
 func TestBrokerDeadLetterSinkExtensions(t *testing.T) {
@@ -246,4 +267,56 @@ func TestMTChannelBrokerRotateTLSCertificates(t *testing.T) {
 	)
 
 	env.Test(ctx, t, broker.RotateMTChannelBrokerTLSCertificates())
+}
+
+func TestBrokerSupportsOIDC(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		environment.WithPollTimings(4*time.Second, 12*time.Minute),
+		eventshub.WithTLS(t),
+	)
+
+	name := feature.MakeRandomK8sName("broker")
+	env.Prerequisite(ctx, t, broker.GoesReady(name, brokerresources.WithEnvConfig()...))
+
+	env.TestSet(ctx, t, oidc.AddressableOIDCConformance(brokerresources.GVR(), "Broker", name, env.Namespace()))
+}
+
+func TestBrokerSendsEventsWithOIDCSupport(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		eventshub.WithTLS(t),
+	)
+
+	env.TestSet(ctx, t, broker.BrokerSendEventWithOIDC())
+}
+
+func TestBrokerSupportsAuthZ(t *testing.T) {
+	t.Parallel()
+
+	ctx, env := global.Environment(
+		knative.WithKnativeNamespace(system.Namespace()),
+		knative.WithLoggingConfig,
+		knative.WithTracingConfig,
+		k8s.WithEventListener,
+		environment.Managed(t),
+		eventshub.WithTLS(t),
+	)
+
+	name := feature.MakeRandomK8sName("broker")
+	env.Prerequisite(ctx, t, broker.GoesReady(name, brokerresources.WithEnvConfig()...))
+
+	env.TestSet(ctx, t, authz.AddressableAuthZConformance(brokerresources.GVR(), "Broker", name))
 }

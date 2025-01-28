@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +17,10 @@ limitations under the License.
 package v1
 
 import (
+	"fmt"
 	"testing"
+
+	"knative.dev/pkg/ptr"
 
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
@@ -33,6 +36,8 @@ var sequenceConditionReady = apis.Condition{
 	Type:   SequenceConditionReady,
 	Status: corev1.ConditionTrue,
 }
+
+var channelAudience = fmt.Sprintf("messaging.knative.dev/inmemorychannel/%s/%s", "testNS", "test-imc")
 
 func TestSequenceGetConditionSet(t *testing.T) {
 	r := &Sequence{}
@@ -58,6 +63,7 @@ func getSubscription(name string, ready bool) *messagingv1.Subscription {
 		s.Status.MarkChannelReady()
 		s.Status.MarkReferencesResolved()
 		s.Status.MarkAddedToChannel()
+		s.Status.MarkOIDCIdentityCreatedSucceeded()
 	} else {
 		s.Status.MarkChannelFailed("testInducedFailure", "Test Induced failure")
 		s.Status.MarkReferencesNotResolved("testInducedFailure", "Test Induced failure")
@@ -68,6 +74,7 @@ func getSubscription(name string, ready bool) *messagingv1.Subscription {
 
 func getChannelable(ready bool) *eventingduckv1.Channelable {
 	URL := apis.HTTP("example.com")
+	channelAudience := fmt.Sprintf("messaging.knative.dev/inmemorychannel/%s/%s", "testNS", "test-imc")
 	c := eventingduckv1.Channelable{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "messaging.knative.dev/v1",
@@ -82,7 +89,7 @@ func getChannelable(ready bool) *eventingduckv1.Channelable {
 			Type:   apis.ConditionReady,
 			Status: corev1.ConditionTrue,
 		}})
-		c.Status.Address = &duckv1.Addressable{URL: URL}
+		c.Status.Address = &duckv1.Addressable{URL: URL, Audience: &channelAudience}
 	} else {
 		c.Status.SetConditions([]apis.Condition{{
 			Type:   apis.ConditionReady,
@@ -139,6 +146,9 @@ func TestSequenceInitializeConditions(t *testing.T) {
 					Type:   SequenceConditionChannelsReady,
 					Status: corev1.ConditionUnknown,
 				}, {
+					Type:   SequenceConditionEventPoliciesReady,
+					Status: corev1.ConditionUnknown,
+				}, {
 					Type:   SequenceConditionReady,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -166,6 +176,9 @@ func TestSequenceInitializeConditions(t *testing.T) {
 					Type:   SequenceConditionChannelsReady,
 					Status: corev1.ConditionFalse,
 				}, {
+					Type:   SequenceConditionEventPoliciesReady,
+					Status: corev1.ConditionUnknown,
+				}, {
 					Type:   SequenceConditionReady,
 					Status: corev1.ConditionUnknown,
 				}, {
@@ -191,6 +204,9 @@ func TestSequenceInitializeConditions(t *testing.T) {
 					Status: corev1.ConditionUnknown,
 				}, {
 					Type:   SequenceConditionChannelsReady,
+					Status: corev1.ConditionUnknown,
+				}, {
+					Type:   SequenceConditionEventPoliciesReady,
 					Status: corev1.ConditionUnknown,
 				}, {
 					Type:   SequenceConditionReady,
@@ -268,6 +284,85 @@ func TestSequencePropagateSubscriptionStatuses(t *testing.T) {
 	}
 }
 
+func TestSequencePropagateSubscriptionOIDCSA(t *testing.T) {
+	tests := []struct {
+		name        string
+		subs        []*messagingv1.Subscription
+		wantOIDCSAs []string
+	}{{
+		name: "empty",
+		subs: []*messagingv1.Subscription{},
+	}, {
+		name: "one subscription",
+		subs: []*messagingv1.Subscription{{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("sub-oidc-sa"),
+				},
+			},
+		}},
+		wantOIDCSAs: []string{"sub-oidc-sa"},
+	}, {
+		name: "multiple subscriptions",
+		subs: []*messagingv1.Subscription{{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub1",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("sub1-oidc-sa"),
+				},
+			},
+		}, {
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "messaging.knative.dev/v1",
+				Kind:       "Subscription",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "sub2",
+				Namespace: "testns",
+			},
+			Status: messagingv1.SubscriptionStatus{
+				Auth: &duckv1.AuthStatus{
+					ServiceAccountName: ptr.String("sub2-oidc-sa"),
+				},
+			},
+		},
+			getSubscription("sub3", true),
+		},
+		wantOIDCSAs: []string{"sub1-oidc-sa", "sub2-oidc-sa"},
+	}}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ps := SequenceStatus{}
+			ps.PropagateSubscriptionStatuses(test.subs)
+
+			var got []string
+			if ps.Auth != nil {
+				got = ps.Auth.ServiceAccountNames
+			}
+
+			if diff := cmp.Diff(test.wantOIDCSAs, got); diff != "" {
+				t.Errorf("unexpected OIDC service accounts (-want, +got) = %v", diff)
+			}
+		})
+	}
+}
+
 func TestSequencePropagateChannelStatuses(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -310,45 +405,59 @@ func TestSequencePropagateChannelStatuses(t *testing.T) {
 
 func TestSequenceReady(t *testing.T) {
 	tests := []struct {
-		name     string
-		subs     []*messagingv1.Subscription
-		channels []*eventingduckv1.Channelable
-		want     bool
+		name               string
+		subs               []*messagingv1.Subscription
+		channels           []*eventingduckv1.Channelable
+		eventPoliciesReady bool
+		want               bool
 	}{{
-		name:     "empty",
-		subs:     []*messagingv1.Subscription{},
-		channels: []*eventingduckv1.Channelable{},
-		want:     false,
+		name:               "empty",
+		subs:               []*messagingv1.Subscription{},
+		channels:           []*eventingduckv1.Channelable{},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "one channelable not ready, one subscription ready",
-		channels: []*eventingduckv1.Channelable{getChannelable(false)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true)},
-		want:     false,
+		name:               "one channelable not ready, one subscription ready",
+		channels:           []*eventingduckv1.Channelable{getChannelable(false)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "one channelable ready, one subscription not ready",
-		channels: []*eventingduckv1.Channelable{getChannelable(true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", false)},
-		want:     false,
+		name:               "one channelable ready, one subscription not ready",
+		channels:           []*eventingduckv1.Channelable{getChannelable(true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", false)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "one channelable ready, one subscription ready",
-		channels: []*eventingduckv1.Channelable{getChannelable(true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true)},
-		want:     true,
+		name:               "one channelable ready, one subscription ready, event policy ready",
+		channels:           []*eventingduckv1.Channelable{getChannelable(true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true)},
+		eventPoliciesReady: true,
+		want:               true,
 	}, {
-		name:     "one channelable ready, one not, two subscriptions ready",
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(false)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
-		want:     false,
+		name:               "one channelable ready, one subscription ready, event policy not ready",
+		channels:           []*eventingduckv1.Channelable{getChannelable(true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true)},
+		eventPoliciesReady: false,
+		want:               false,
 	}, {
-		name:     "two channelables ready, one subscription ready, one not",
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", false)},
-		want:     false,
+		name:               "one channelable ready, one not, two subscriptions ready",
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(false)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
+		eventPoliciesReady: true,
+		want:               false,
 	}, {
-		name:     "two channelables ready, two subscriptions ready",
-		channels: []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
-		subs:     []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
-		want:     true,
+		name:               "two channelables ready, one subscription ready, one not",
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", false)},
+		eventPoliciesReady: true,
+		want:               false,
+	}, {
+		name:               "two channelables ready, two subscriptions ready",
+		channels:           []*eventingduckv1.Channelable{getChannelable(true), getChannelable(true)},
+		subs:               []*messagingv1.Subscription{getSubscription("sub0", true), getSubscription("sub1", true)},
+		eventPoliciesReady: true,
+		want:               true,
 	}}
 
 	for _, test := range tests {
@@ -356,6 +465,13 @@ func TestSequenceReady(t *testing.T) {
 			ps := SequenceStatus{}
 			ps.PropagateChannelStatuses(test.channels)
 			ps.PropagateSubscriptionStatuses(test.subs)
+
+			if test.eventPoliciesReady {
+				ps.MarkEventPoliciesTrue()
+			} else {
+				ps.MarkEventPoliciesFailed("", "")
+			}
+
 			got := ps.IsReady()
 			want := test.want
 			if want != got {
@@ -368,13 +484,15 @@ func TestSequenceReady(t *testing.T) {
 func TestSequencePropagateSetAddress(t *testing.T) {
 	URL := apis.HTTP("example.com")
 	URL2 := apis.HTTP("another.example.com")
+
 	tests := []struct {
-		name        string
-		status      SequenceStatus
-		address     *duckv1.Addressable
-		want        duckv1.Addressable
-		wantStatus  corev1.ConditionStatus
-		wantAddress string
+		name         string
+		status       SequenceStatus
+		address      *duckv1.Addressable
+		want         duckv1.Addressable
+		wantStatus   corev1.ConditionStatus
+		wantAddress  string
+		wantAudience *string
 	}{{
 		name:       "nil",
 		status:     SequenceStatus{},
@@ -421,6 +539,14 @@ func TestSequencePropagateSetAddress(t *testing.T) {
 		address:    &duckv1.Addressable{URL: nil},
 		want:       duckv1.Addressable{},
 		wantStatus: corev1.ConditionUnknown,
+	}, {
+		name:         "audience",
+		status:       SequenceStatus{},
+		address:      &duckv1.Addressable{URL: URL, Audience: &channelAudience},
+		want:         duckv1.Addressable{URL: URL, Audience: &channelAudience},
+		wantStatus:   corev1.ConditionTrue,
+		wantAddress:  "http://example.com",
+		wantAudience: &channelAudience,
 	}}
 
 	for _, tt := range tests {
@@ -439,8 +565,12 @@ func TestSequencePropagateSetAddress(t *testing.T) {
 			if got.URL != nil {
 				gotAddress = got.URL.String()
 			}
+
 			if diff := cmp.Diff(tt.wantAddress, gotAddress); diff != "" {
 				t.Error("unexpected address.url (-want, +got) =", diff)
+			}
+			if diff := cmp.Diff(tt.wantAudience, got.Audience); diff != "" {
+				t.Error("unexpected address.audience (-want, +got) =", diff)
 			}
 		})
 	}

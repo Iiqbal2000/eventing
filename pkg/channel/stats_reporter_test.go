@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,8 +29,9 @@ import (
 func TestStatsReporter(t *testing.T) {
 	setup()
 	args := &ReportArgs{
-		Ns:        "testns",
-		EventType: "testeventtype",
+		Ns:          "testns",
+		EventType:   "testeventtype",
+		EventScheme: "http",
 	}
 
 	r := NewStatsReporter("testcontainer", "testpod")
@@ -42,6 +43,7 @@ func TestStatsReporter(t *testing.T) {
 		metrics.LabelResponseCodeClass: "2xx",
 		LabelUniqueName:                "testpod",
 		LabelContainerName:             "testcontainer",
+		metrics.LabelEventScheme:       "http",
 	}
 
 	// test ReportEventCount

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 
 	"knative.dev/pkg/apis"
 
@@ -39,9 +40,11 @@ import (
 	"knative.dev/pkg/resolver"
 	"knative.dev/pkg/tracker"
 
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	"knative.dev/eventing/pkg/apis/feature"
 	v1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/auth"
 	subscriptionreconciler "knative.dev/eventing/pkg/client/injection/reconciler/messaging/v1/subscription"
 	listers "knative.dev/eventing/pkg/client/listers/messaging/v1"
 	eventingduck "knative.dev/eventing/pkg/duck"
@@ -69,12 +72,15 @@ type Reconciler struct {
 	// crdLister is used to resolve the ref version
 	kreferenceResolver *kref.KReferenceResolver
 
+	kubeclient kubernetes.Interface
+
 	// listers index properties about resources
-	subscriptionLister  listers.SubscriptionLister
-	channelLister       listers.ChannelLister
-	channelableTracker  eventingduck.ListableTracker
-	destinationResolver *resolver.URIResolver
-	tracker             tracker.Interface
+	subscriptionLister   listers.SubscriptionLister
+	channelLister        listers.ChannelLister
+	channelableTracker   eventingduck.ListableTracker
+	destinationResolver  *resolver.URIResolver
+	tracker              tracker.Interface
+	serviceAccountLister corev1listers.ServiceAccountLister
 }
 
 // Check that our Reconciler implements Interface
@@ -85,6 +91,14 @@ var _ subscriptionreconciler.Finalizer = (*Reconciler)(nil)
 
 // ReconcileKind implements Interface.ReconcileKind.
 func (r *Reconciler) ReconcileKind(ctx context.Context, subscription *v1.Subscription) pkgreconciler.Event {
+	// OIDC authentication
+	featureFlags := feature.FromContext(ctx)
+	if err := auth.SetupOIDCServiceAccount(ctx, featureFlags, r.serviceAccountLister, r.kubeclient, v1.SchemeGroupVersion.WithKind("Subscription"), subscription.ObjectMeta, &subscription.Status, func(as *duckv1.AuthStatus) {
+		subscription.Status.Auth = as
+	}); err != nil {
+		return err
+	}
+
 	// Find the channel for this subscription.
 	channel, err := r.getChannel(ctx, subscription)
 	if err != nil {
@@ -230,9 +244,11 @@ func (r *Reconciler) resolveSubscriber(ctx context.Context, subscription *v1.Sub
 		logging.FromContext(ctx).Debugw("Resolved Subscriber", zap.Any("subscriber", subscriberAddr))
 		subscription.Status.PhysicalSubscription.SubscriberURI = subscriberAddr.URL
 		subscription.Status.PhysicalSubscription.SubscriberCACerts = subscriberAddr.CACerts
+		subscription.Status.PhysicalSubscription.SubscriberAudience = subscriberAddr.Audience
 	} else {
 		subscription.Status.PhysicalSubscription.SubscriberURI = nil
 		subscription.Status.PhysicalSubscription.SubscriberCACerts = nil
+		subscription.Status.PhysicalSubscription.SubscriberAudience = nil
 	}
 	return nil
 }
@@ -259,9 +275,11 @@ func (r *Reconciler) resolveReply(ctx context.Context, subscription *v1.Subscrip
 		logging.FromContext(ctx).Debugw("Resolved reply", zap.Any("reply", replyAddr))
 		subscription.Status.PhysicalSubscription.ReplyURI = replyAddr.URL
 		subscription.Status.PhysicalSubscription.ReplyCACerts = replyAddr.CACerts
+		subscription.Status.PhysicalSubscription.ReplyAudience = replyAddr.Audience
 	} else {
 		subscription.Status.PhysicalSubscription.ReplyURI = nil
 		subscription.Status.PhysicalSubscription.ReplyCACerts = nil
+		subscription.Status.PhysicalSubscription.ReplyAudience = nil
 	}
 	return nil
 }
@@ -331,11 +349,16 @@ func (r *Reconciler) trackAndFetchChannel(ctx context.Context, sub *v1.Subscript
 		ref = *newRef
 	}
 
+	channelNamespace := sub.Namespace
+	if feature.FromContextOrDefaults(ctx).IsCrossNamespaceEventLinks() && sub.Spec.Channel.Namespace != "" {
+		channelNamespace = sub.Spec.Channel.Namespace
+	}
+
 	// Track the channel using the channelableTracker.
 	// We don't need the explicitly set a channelInformer, as this will dynamically generate one for us.
 	// This code needs to be called before checking the existence of the `channel`, in order to make sure the
 	// subscription controller will reconcile upon a `channel` change.
-	if err := r.channelableTracker.TrackInNamespaceKReference(ctx, sub)(ref); err != nil {
+	if err := r.channelableTracker.TrackKReference(ctx, sub, channelNamespace)(ref); err != nil {
 		return nil, pkgreconciler.NewEvent(corev1.EventTypeWarning, "TrackerFailed", "unable to track changes to spec.channel: %w", err)
 	}
 	chLister, err := r.channelableTracker.ListerForKReference(ref)
@@ -343,7 +366,8 @@ func (r *Reconciler) trackAndFetchChannel(ctx context.Context, sub *v1.Subscript
 		logging.FromContext(ctx).Errorw("Error getting lister for Channel", zap.Any("channel", ref), zap.Error(err))
 		return nil, err
 	}
-	obj, err := chLister.ByNamespace(sub.Namespace).Get(ref.Name)
+
+	obj, err := chLister.ByNamespace(channelNamespace).Get(ref.Name)
 	if err != nil {
 		logging.FromContext(ctx).Errorw("Error getting channel from lister", zap.Any("channel", ref), zap.Error(err))
 		return nil, err
@@ -372,6 +396,11 @@ func (r *Reconciler) getChannel(ctx context.Context, sub *v1.Subscription) (*eve
 	// to have a "backing" channel that is what we need to actually operate on
 	// as well as keep track of.
 	if v1ChannelGVK.Group == gvk.Group && v1ChannelGVK.Kind == gvk.Kind {
+		channelNamespace := sub.Namespace
+		if feature.FromContext(ctx).IsEnabled(feature.CrossNamespaceEventLinks) && sub.Spec.Channel.Namespace != "" {
+			channelNamespace = sub.Spec.Channel.Namespace
+		}
+
 		// Track changes on Channel.
 		// Ref: https://github.com/knative/eventing/issues/2641
 		// NOTE: There is a race condition with using the channelableTracker
@@ -385,7 +414,7 @@ func (r *Reconciler) getChannel(ctx context.Context, sub *v1.Subscription) (*eve
 		if err := r.tracker.TrackReference(tracker.Reference{
 			APIVersion: "messaging.knative.dev/v1",
 			Kind:       "Channel",
-			Namespace:  sub.Namespace,
+			Namespace:  channelNamespace,
 			Name:       sub.Spec.Channel.Name,
 		}, sub); err != nil {
 			logging.FromContext(ctx).Infow("TrackReference for Channel failed", zap.Any("channel", sub.Spec.Channel), zap.Error(err))
@@ -397,7 +426,7 @@ func (r *Reconciler) getChannel(ctx context.Context, sub *v1.Subscription) (*eve
 		// the status of it will not have the extra bits we need (namely, pointer
 		// and status of the actual "backing" channel), we fetch it using typed
 		// lister so that we get those bits.
-		channel, err := r.channelLister.Channels(sub.Namespace).Get(sub.Spec.Channel.Name)
+		channel, err := r.channelLister.Channels(channelNamespace).Get(sub.Spec.Channel.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -407,7 +436,7 @@ func (r *Reconciler) getChannel(ctx context.Context, sub *v1.Subscription) (*eve
 			return nil, fmt.Errorf("channel is not ready.")
 		}
 
-		statCh := duckv1.KReference{Name: channel.Status.Channel.Name, Namespace: sub.Namespace, Kind: channel.Status.Channel.Kind, APIVersion: channel.Status.Channel.APIVersion}
+		statCh := duckv1.KReference{Name: channel.Status.Channel.Name, Namespace: channelNamespace, Kind: channel.Status.Channel.Kind, APIVersion: channel.Status.Channel.APIVersion}
 		obj, err = r.trackAndFetchChannel(ctx, sub, statCh)
 		if err != nil {
 			return nil, err
@@ -430,7 +459,11 @@ func isNilOrEmptyDestination(destination *duckv1.Destination) bool {
 
 func (r *Reconciler) syncPhysicalChannel(ctx context.Context, sub *v1.Subscription, channel *eventingduckv1.Channelable, isDeleted bool) (bool, error) {
 	logging.FromContext(ctx).Debugw("Reconciling physical from Channel", zap.Any("sub", sub))
-	if patched, patchErr := r.patchSubscription(ctx, sub.Namespace, channel, sub); patchErr != nil {
+	channelNamespace := sub.Namespace
+	if feature.FromContext(ctx).IsEnabled(feature.CrossNamespaceEventLinks) && sub.Spec.Channel.Namespace != "" {
+		channelNamespace = sub.Spec.Channel.Namespace
+	}
+	if patched, patchErr := r.patchSubscription(ctx, channelNamespace, channel, sub); patchErr != nil {
 		if isDeleted && apierrors.IsNotFound(patchErr) {
 			logging.FromContext(ctx).Warnw("Could not find Channel", zap.Any("channel", sub.Spec.Channel))
 			return false, nil
@@ -445,7 +478,7 @@ func (r *Reconciler) patchSubscription(ctx context.Context, namespace string, ch
 	after := channel.DeepCopy()
 
 	if sub.DeletionTimestamp.IsZero() {
-		r.updateChannelAddSubscription(after, sub)
+		r.updateChannelAddSubscriptionSpec(after, sub)
 	} else {
 		r.updateChannelRemoveSubscription(after, sub)
 	}
@@ -485,28 +518,36 @@ func (r *Reconciler) updateChannelRemoveSubscription(channel *eventingduckv1.Cha
 	}
 }
 
-func (r *Reconciler) updateChannelAddSubscription(channel *eventingduckv1.Channelable, sub *v1.Subscription) {
+func (r *Reconciler) updateChannelAddSubscriptionSpec(channel *eventingduckv1.Channelable, sub *v1.Subscription) {
 	// Look to update subscriber.
 	for i, v := range channel.Spec.Subscribers {
 		if v.UID == sub.UID {
+			channel.Spec.Subscribers[i].Name = &sub.Name
 			channel.Spec.Subscribers[i].Generation = sub.Generation
 			channel.Spec.Subscribers[i].SubscriberURI = sub.Status.PhysicalSubscription.SubscriberURI
 			channel.Spec.Subscribers[i].SubscriberCACerts = sub.Status.PhysicalSubscription.SubscriberCACerts
+			channel.Spec.Subscribers[i].SubscriberAudience = sub.Status.PhysicalSubscription.SubscriberAudience
 			channel.Spec.Subscribers[i].ReplyURI = sub.Status.PhysicalSubscription.ReplyURI
 			channel.Spec.Subscribers[i].ReplyCACerts = sub.Status.PhysicalSubscription.ReplyCACerts
+			channel.Spec.Subscribers[i].ReplyAudience = sub.Status.PhysicalSubscription.ReplyAudience
 			channel.Spec.Subscribers[i].Delivery = deliverySpec(sub, channel)
+			channel.Spec.Subscribers[i].Auth = sub.Status.Auth
 			return
 		}
 	}
 
 	toAdd := eventingduckv1.SubscriberSpec{
-		UID:               sub.UID,
-		Generation:        sub.Generation,
-		SubscriberURI:     sub.Status.PhysicalSubscription.SubscriberURI,
-		SubscriberCACerts: sub.Status.PhysicalSubscription.SubscriberCACerts,
-		ReplyURI:          sub.Status.PhysicalSubscription.ReplyURI,
-		ReplyCACerts:      sub.Status.PhysicalSubscription.ReplyCACerts,
-		Delivery:          deliverySpec(sub, channel),
+		Name:               &sub.Name,
+		UID:                sub.UID,
+		Generation:         sub.Generation,
+		SubscriberURI:      sub.Status.PhysicalSubscription.SubscriberURI,
+		SubscriberCACerts:  sub.Status.PhysicalSubscription.SubscriberCACerts,
+		SubscriberAudience: sub.Status.PhysicalSubscription.SubscriberAudience,
+		ReplyURI:           sub.Status.PhysicalSubscription.ReplyURI,
+		ReplyCACerts:       sub.Status.PhysicalSubscription.ReplyCACerts,
+		ReplyAudience:      sub.Status.PhysicalSubscription.ReplyAudience,
+		Delivery:           deliverySpec(sub, channel),
+		Auth:               sub.Status.Auth,
 	}
 
 	// Must not have been found. Add it.

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -96,10 +96,11 @@ func TestReporterEmptySourceAndTypeFilter(t *testing.T) {
 	setup()
 
 	args := &ReportArgs{
-		ns:         "testns",
-		trigger:    "testtrigger",
-		broker:     "testbroker",
-		filterType: "",
+		ns:            "testns",
+		trigger:       "testtrigger",
+		broker:        "testbroker",
+		filterType:    "",
+		requestScheme: "http",
 	}
 
 	r := NewStatsReporter("testcontainer", "testpod")
@@ -110,6 +111,7 @@ func TestReporterEmptySourceAndTypeFilter(t *testing.T) {
 		metrics.LabelResponseCodeClass: "2xx",
 		broker.LabelContainerName:      "testcontainer",
 		broker.LabelUniqueName:         "testpod",
+		metrics.LabelEventScheme:       "http",
 	}
 
 	resource := resource.Resource{

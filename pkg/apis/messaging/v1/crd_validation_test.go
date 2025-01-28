@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,12 +29,17 @@ type CRDTest struct {
 	name string
 	cr   resourcesemantics.GenericCRD
 	want *apis.FieldError
+	ctx  context.Context
 }
 
 func doValidateTest(t *testing.T, tests []CRDTest) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := test.cr.Validate(context.TODO())
+			ctx := test.ctx
+			if ctx == nil {
+				ctx = context.TODO()
+			}
+			got := test.cr.Validate(ctx)
 			if diff := cmp.Diff(test.want.Error(), got.Error()); diff != "" {
 				t.Errorf("%s: validate (-want, +got) = %v", test.name, diff)
 			}

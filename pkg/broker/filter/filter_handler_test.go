@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,6 +27,15 @@ import (
 	"testing"
 	"time"
 
+	filteredFactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/system"
+
+	"knative.dev/eventing/pkg/eventingtls"
+
+	messagingv1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/reconciler/broker/resources"
+
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/cloudevents/sdk-go/v2/binding"
 	"github.com/cloudevents/sdk-go/v2/event"
@@ -35,16 +44,32 @@ import (
 	"go.uber.org/atomic"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/apis"
-
-	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
-	"knative.dev/eventing/pkg/apis/feature"
-	"knative.dev/eventing/pkg/broker"
+	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/fake"
+	filteredconfigmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/filtered/fake"
+	"knative.dev/pkg/logging"
 	reconcilertesting "knative.dev/pkg/reconciler/testing"
 
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	v1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/auth"
+	"knative.dev/eventing/pkg/broker"
+	"knative.dev/eventing/pkg/eventfilter/subscriptionsapi"
+
+	brokerinformerfake "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/broker/fake"
 	triggerinformerfake "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/trigger/fake"
+	eventpolicyinformerfake "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy/fake"
+	subscriptioninformerfake "knative.dev/eventing/pkg/client/injection/informers/messaging/v1/subscription/fake"
+
+	_ "knative.dev/pkg/client/injection/kube/client/fake"
+	_ "knative.dev/pkg/client/injection/kube/informers/factory/filtered/fake"
+
+	// Fake injection client
+	_ "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy/fake"
 )
 
 const (
@@ -98,7 +123,7 @@ func TestReceiver(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		"Path too long": {
-			request:        httptest.NewRequest(http.MethodPost, "/triggers/test-namespace/test-trigger/extra", nil),
+			request:        httptest.NewRequest(http.MethodPost, "/triggers/test-namespace/test-trigger/uuid/extra/extra", nil),
 			expectedStatus: http.StatusBadRequest,
 		},
 		"Path without prefix": {
@@ -107,7 +132,7 @@ func TestReceiver(t *testing.T) {
 		},
 		"Trigger.Get fails": {
 			// No trigger exists, so the Get will fail.
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusNotFound,
 		},
 		"Trigger doesn't have SubscriberURI": {
 			triggers: []*eventingv1.Trigger{
@@ -410,7 +435,11 @@ func TestReceiver(t *testing.T) {
 	}
 	for n, tc := range testCases {
 		t.Run(n, func(t *testing.T) {
-			ctx, _ := reconcilertesting.SetupFakeContext(t)
+			ctx, _ := reconcilertesting.SetupFakeContext(t, SetUpInformerSelector)
+			ctx = feature.ToContext(ctx, feature.Flags{
+				feature.OIDCAuthentication: feature.Enabled,
+			})
+			trustBundleConfigMapLister := filteredconfigmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector).Lister().ConfigMaps(system.Namespace())
 
 			fh := fakeHandler{
 				failRequest:            tc.requestFails,
@@ -424,8 +453,22 @@ func TestReceiver(t *testing.T) {
 			s := httptest.NewServer(&fh)
 			defer s.Close()
 
-			// Replace the SubscriberURI to point at our fake server.
+			logger := zaptest.NewLogger(t, zaptest.WrapOptions(zap.AddCaller()))
+			oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+			authVerifier := auth.NewVerifier(ctx, eventpolicyinformerfake.Get(ctx).Lister(), trustBundleConfigMapLister, configmap.NewStaticWatcher(
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "config-features",
+						Namespace: "knative-eventing",
+					},
+					Data: map[string]string{
+						feature.OIDCAuthentication: string(feature.Enabled),
+					},
+				},
+			))
+
 			for _, trig := range tc.triggers {
+				// Replace the SubscriberURI to point at our fake server.
 				if trig.Status.SubscriberURI != nil && trig.Status.SubscriberURI.String() == toBeReplaced {
 
 					url, err := apis.ParseURL(s.URL)
@@ -435,12 +478,36 @@ func TestReceiver(t *testing.T) {
 					trig.Status.SubscriberURI = url
 				}
 				triggerinformerfake.Get(ctx).Informer().GetStore().Add(trig)
+
+				// create needed triggers subscription object
+				sub := &messagingv1.Subscription{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resources.SubscriptionName(feature.FromContext(ctx), trig),
+						Namespace: trig.Namespace,
+					},
+				}
+				subscriptioninformerfake.Get(ctx).Informer().GetStore().Add(sub)
+
+				// create the needed broker object
+				b := &v1.Broker{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      trig.Spec.Broker,
+						Namespace: trig.Namespace,
+					},
+				}
+				brokerinformerfake.Get(ctx).Informer().GetStore().Add(b)
 			}
+
 			reporter := &mockReporter{}
 			r, err := NewHandler(
-				zaptest.NewLogger(t, zaptest.WrapOptions(zap.AddCaller())),
+				logger,
+				authVerifier,
+				oidcTokenProvider,
 				triggerinformerfake.Get(ctx),
+				brokerinformerfake.Get(ctx),
+				subscriptioninformerfake.Get(ctx),
 				reporter,
+				configmapinformer.Get(ctx).Lister().ConfigMaps("ns"),
 				func(ctx context.Context) context.Context {
 					return ctx
 				},
@@ -583,16 +650,42 @@ func TestReceiver_WithSubscriptionsAPI(t *testing.T) {
 			expectedEventCount:        true,
 			expectedEventDispatchTime: true,
 		},
+		"Dispatch failed - empty SubscriptionsAPI filter does not override Attributes Filter": {
+			triggers: []*eventingv1.Trigger{
+				makeTrigger(
+					withAttributesFilter(&eventingv1.TriggerFilter{
+						Attributes: map[string]string{"type": "some-other-type", "source": "some-other-source"},
+					})),
+			},
+			expectedEventCount: false,
+		},
 	}
 	for n, tc := range testCases {
 		t.Run(n, func(t *testing.T) {
-			ctx, _ := reconcilertesting.SetupFakeContext(t)
+			ctx, _ := reconcilertesting.SetupFakeContext(t, SetUpInformerSelector)
+			trustBundleConfigMapLister := filteredconfigmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector).Lister().ConfigMaps(system.Namespace())
 
 			fh := fakeHandler{
 				t: t,
 			}
 			s := httptest.NewServer(&fh)
 			defer s.Close()
+
+			filtersMap := subscriptionsapi.NewFiltersMap()
+
+			logger := zaptest.NewLogger(t, zaptest.WrapOptions(zap.AddCaller()))
+			oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+			authVerifier := auth.NewVerifier(ctx, eventpolicyinformerfake.Get(ctx).Lister(), trustBundleConfigMapLister, configmap.NewStaticWatcher(
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "config-features",
+						Namespace: "knative-eventing",
+					},
+					Data: map[string]string{
+						feature.OIDCAuthentication: string(feature.Enabled),
+					},
+				},
+			))
 
 			// Replace the SubscriberURI to point at our fake server.
 			for _, trig := range tc.triggers {
@@ -605,20 +698,44 @@ func TestReceiver_WithSubscriptionsAPI(t *testing.T) {
 					trig.Status.SubscriberURI = url
 				}
 				triggerinformerfake.Get(ctx).Informer().GetStore().Add(trig)
+				filtersMap.Set(trig, subscriptionsapi.CreateSubscriptionsAPIFilters(logging.FromContext(ctx).Desugar(), trig.Spec.Filters))
+
+				// create needed triggers subscription object
+				sub := &messagingv1.Subscription{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resources.SubscriptionName(feature.FromContext(ctx), trig),
+						Namespace: trig.Namespace,
+					},
+				}
+				subscriptioninformerfake.Get(ctx).Informer().GetStore().Add(sub)
+
+				// create the needed broker object
+				b := &v1.Broker{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      trig.Spec.Broker,
+						Namespace: trig.Namespace,
+					},
+				}
+				brokerinformerfake.Get(ctx).Informer().GetStore().Add(b)
 			}
 			reporter := &mockReporter{}
 			r, err := NewHandler(
-				zaptest.NewLogger(t, zaptest.WrapOptions(zap.AddCaller())),
+				logger,
+				authVerifier,
+				oidcTokenProvider,
 				triggerinformerfake.Get(ctx),
+				brokerinformerfake.Get(ctx),
+				subscriptioninformerfake.Get(ctx),
 				reporter,
+				configmapinformer.Get(ctx).Lister().ConfigMaps("ns"),
 				func(ctx context.Context) context.Context {
-					return feature.ToContext(context.TODO(), feature.Flags{
-						feature.NewTriggerFilters: feature.Enabled,
-					})
+					return ctx
 				})
 			if err != nil {
 				t.Fatal("Unable to create receiver:", err)
 			}
+
+			r.filtersMap = filtersMap
 
 			e := tc.event
 			if e == nil {
@@ -903,4 +1020,9 @@ func makeEmptyResponse(status int) *http.Response {
 		Header:     make(http.Header),
 	}
 	return r
+}
+
+func SetUpInformerSelector(ctx context.Context) context.Context {
+	ctx = filteredFactory.WithSelectors(ctx, eventingtls.TrustBundleLabelSelector)
+	return ctx
 }

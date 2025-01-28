@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,8 @@ limitations under the License.
 package testing
 
 import (
+	"math/rand"
+
 	duckv1alpha1 "knative.dev/eventing/pkg/apis/duck/v1alpha1"
 	"knative.dev/eventing/pkg/scheduler"
 )
@@ -50,4 +52,11 @@ func (s *VPodClient) Append(vpod scheduler.VPod) {
 
 func (s *VPodClient) List() ([]scheduler.VPod, error) {
 	return s.lister()
+}
+
+func (s *VPodClient) Random() scheduler.VPod {
+	s.store.lock.Lock()
+	defer s.store.lock.Unlock()
+
+	return s.store.vpods[rand.Intn(len(s.store.vpods))]
 }

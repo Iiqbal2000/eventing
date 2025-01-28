@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -81,6 +81,9 @@ func WithSink(d *duckv1.Destination) manifest.CfgFn {
 			// This is a multi-line string and should be indented accordingly.
 			// Replace "new line" with "new line + spaces".
 			sink["CACerts"] = strings.ReplaceAll(*d.CACerts, "\n", "\n      ")
+		}
+		if d.Audience != nil {
+			sink["audience"] = *d.Audience
 		}
 
 		if uri != nil {

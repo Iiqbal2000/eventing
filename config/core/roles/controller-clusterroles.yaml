@@ -31,7 +31,8 @@ rules:
       - "events"
       - "serviceaccounts"
       - "pods"
-    verbs: &everything
+      - "serviceaccounts/token"
+    verbs:
       - "get"
       - "list"
       - "create"
@@ -45,7 +46,23 @@ rules:
       - "apps"
     resources:
       - "deployments"
-    verbs: *everything
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
+
+  - apiGroups:
+      - "batch"
+    resources:
+      - "jobs"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
 
   # PingSource controller manipulates Deployment owner reference
   - apiGroups:
@@ -60,7 +77,15 @@ rules:
       - "rbac.authorization.k8s.io"
     resources:
       - "rolebindings"
-    verbs: *everything
+      - "roles"
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
 
   # Our own resources and statuses we care about.
   - apiGroups:
@@ -72,7 +97,32 @@ rules:
       - "triggers/status"
       - "eventtypes"
       - "eventtypes/status"
-    verbs: *everything
+      - "eventpolicies"
+      - "eventpolicies/status"
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
+
+  - apiGroups:
+      - "sinks.knative.dev"
+    resources:
+      - "jobsinks"
+      - "jobsinks/status"
+      - "integrationsinks"
+      - "integrationsinks/status"
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
 
   # Eventing resources and finalizers we care about.
   - apiGroups:
@@ -80,6 +130,14 @@ rules:
     resources:
       - "brokers/finalizers"
       - "triggers/finalizers"
+    verbs:
+      - "update"
+
+  - apiGroups:
+      - "sinks.knative.dev"
+    resources:
+      - "jobsinks/finalizers"
+      - "integrationsinks/finalizers"
     verbs:
       - "update"
 
@@ -95,7 +153,14 @@ rules:
       - "parallels/status"
       - "subscriptions"
       - "subscriptions/status"
-    verbs: *everything
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
 
   # Flow resources and statuses we care about.
   - apiGroups:
@@ -105,7 +170,14 @@ rules:
       - "sequences/status"
       - "parallels"
       - "parallels/status"
-    verbs: *everything
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"
 
   # Messaging resources and finalizers we care about.
   - apiGroups:
@@ -141,4 +213,11 @@ rules:
       - "coordination.k8s.io"
     resources:
       - "leases"
-    verbs: *everything
+    verbs:
+      - "get"
+      - "list"
+      - "create"
+      - "update"
+      - "delete"
+      - "patch"
+      - "watch"

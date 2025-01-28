@@ -20,6 +20,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	v2 "github.com/cloudevents/sdk-go/v2"
 	"github.com/cloudevents/sdk-go/v2/event"
@@ -27,10 +28,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"knative.dev/eventing/pkg/apis/eventing/v1beta2"
+	"knative.dev/eventing/pkg/apis/eventing/v1beta3"
 	"knative.dev/eventing/pkg/apis/feature"
 	fakeeventingclientset "knative.dev/eventing/pkg/client/clientset/versioned/fake"
-	reconcilertestingv1beta2 "knative.dev/eventing/pkg/reconciler/testing/v1beta2"
+	reconcilertestingv1beta3 "knative.dev/eventing/pkg/reconciler/testing/v1beta3"
 	"knative.dev/eventing/test/lib/resources"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 	logtesting "knative.dev/pkg/logging/testing"
@@ -42,7 +43,7 @@ func TestEventTypeAutoHandler_AutoCreateEventType(t *testing.T) {
 		featureFlag       string
 		addressable       *duckv1.KReference
 		events            []v2.Event
-		expectedEventType []v1beta2.EventType
+		expectedEventType []v1beta3.EventType
 		expectedError     error
 	}{
 		{
@@ -54,7 +55,7 @@ func TestEventTypeAutoHandler_AutoCreateEventType(t *testing.T) {
 				Namespace:  "default",
 				Name:       "broker"},
 			events: []v2.Event{initEvent("")},
-			expectedEventType: []v1beta2.EventType{
+			expectedEventType: []v1beta3.EventType{
 				initEventTypeObject(),
 				initEventTypeObject()},
 			expectedError: nil,
@@ -70,7 +71,7 @@ func TestEventTypeAutoHandler_AutoCreateEventType(t *testing.T) {
 			events: []v2.Event{
 				initEvent("foo.type"),
 				initEvent("bar.type")},
-			expectedEventType: []v1beta2.EventType{
+			expectedEventType: []v1beta3.EventType{
 				initEventTypeObject(),
 				initEventTypeObject()},
 			expectedError: nil,
@@ -79,13 +80,13 @@ func TestEventTypeAutoHandler_AutoCreateEventType(t *testing.T) {
 	for _, tc := range testCases {
 		ctx := context.TODO()
 		eventtypes := make([]runtime.Object, 0, 10)
-		listers := reconcilertestingv1beta2.NewListers(eventtypes)
+		listers := reconcilertestingv1beta3.NewListers(eventtypes)
 		eventingClient := fakeeventingclientset.NewSimpleClientset()
 		logger := zap.NewNop()
 
 		handler := &EventTypeAutoHandler{
 			EventTypeLister: listers.GetEventTypeLister(),
-			EventingClient:  eventingClient.EventingV1beta2(),
+			EventingClient:  eventingClient.EventingV1beta3(),
 			FeatureStore:    initFeatureStore(t, tc.featureFlag),
 			Logger:          logger,
 		}
@@ -94,17 +95,11 @@ func TestEventTypeAutoHandler_AutoCreateEventType(t *testing.T) {
 
 		for i, event := range tc.events {
 
-			err := handler.AutoCreateEventType(ctx, &event, tc.addressable, ownerUID)
-			if err != nil {
-				if tc.expectedError == err {
-					t.Errorf("test case '%s', expected '%s', got '%s'", tc.name, tc.expectedError, err)
-				} else {
-					t.Error(err)
-				}
-			}
+			handler.AutoCreateEventType(ctx, &event, tc.addressable, ownerUID)
+			time.Sleep(time.Millisecond * 500) // autocreate runs in a different goroutine, need to wait for it to finish
 
 			etName := generateEventTypeName(tc.addressable.Name, tc.addressable.Namespace, event.Type(), event.Source())
-			et, err := eventingClient.EventingV1beta2().EventTypes(tc.addressable.Namespace).Get(ctx, etName, metav1.GetOptions{})
+			et, err := eventingClient.EventingV1beta3().EventTypes(tc.addressable.Namespace).Get(ctx, etName, metav1.GetOptions{})
 			if err != nil {
 				t.Error(err)
 			}
@@ -277,9 +272,9 @@ func initEvent(eventType string) v2.Event {
 	return e
 }
 
-func initEventTypeObject() v1beta2.EventType {
-	return v1beta2.EventType{
-		Spec: v1beta2.EventTypeSpec{
+func initEventTypeObject() v1beta3.EventType {
+	return v1beta3.EventType{
+		Spec: v1beta3.EventTypeSpec{
 			Reference: &duckv1.KReference{
 				APIVersion: "eventing.knative.dev/v1",
 				Kind:       "Broker",

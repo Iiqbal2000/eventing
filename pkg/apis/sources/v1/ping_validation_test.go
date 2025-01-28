@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,6 +44,42 @@ func TestPingSourceValidation(t *testing.T) {
 			source: PingSource{
 				Spec: PingSourceSpec{
 					Schedule: "*/2 * * * *",
+					SourceSpec: duckv1.SourceSpec{
+						Sink: duckv1.Destination{
+							Ref: &duckv1.KReference{
+								APIVersion: "v1",
+								Kind:       "broker",
+								Name:       "default",
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "valid spec with schedule every 5 seconds",
+			source: PingSource{
+				Spec: PingSourceSpec{
+					Schedule: "0/5 * * * * *",
+					SourceSpec: duckv1.SourceSpec{
+						Sink: duckv1.Destination{
+							Ref: &duckv1.KReference{
+								APIVersion: "v1",
+								Kind:       "broker",
+								Name:       "default",
+							},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "valid spec with schedule including seconds",
+			source: PingSource{
+				Spec: PingSourceSpec{
+					Schedule: "10 0/5 * * * ?",
 					SourceSpec: duckv1.SourceSpec{
 						Sink: duckv1.Destination{
 							Ref: &duckv1.KReference{
@@ -107,7 +143,8 @@ func TestPingSourceValidation(t *testing.T) {
 			want: func() *apis.FieldError {
 				return apis.ErrGeneric("expected at least one, got none", "ref", "uri").ViaField("spec.sink")
 			}(),
-		}, {
+		},
+		{
 			name: "invalid schedule",
 			source: PingSource{
 				Spec: PingSourceSpec{
@@ -125,11 +162,12 @@ func TestPingSourceValidation(t *testing.T) {
 			},
 			want: func() *apis.FieldError {
 				var errs *apis.FieldError
-				fe := apis.ErrInvalidValue("expected exactly 5 fields, found 1: [2]", "spec.schedule")
+				fe := apis.ErrInvalidValue("expected 5 to 6 fields, found 1: [2]", "spec.schedule")
 				errs = errs.Also(fe)
 				return errs
 			}(),
-		}, {
+		},
+		{
 			name: "valid spec with data",
 			source: PingSource{
 				Spec: PingSourceSpec{

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -128,8 +128,9 @@ O2dgzikq8iSy1BlRsVw=
 						"sidecar.istio.io/inject": "true",
 					},
 					Labels: map[string]string{
-						"test-key1": "test-value1",
-						"test-key2": "test-value2",
+						"sidecar.istio.io/inject": "true",
+						"test-key1":               "test-value1",
+						"test-key2":               "test-value2",
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -143,7 +144,7 @@ O2dgzikq8iSy1BlRsVw=
 								Name:          "metrics",
 								ContainerPort: 9090,
 							}, {
-								Name:          "health",
+								Name:          "probes",
 								ContainerPort: 8080,
 							}},
 							Env: []corev1.EnvVar{
@@ -186,7 +187,16 @@ O2dgzikq8iSy1BlRsVw=
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
-										Port: intstr.FromString("health"),
+										Port: intstr.FromString("probes"),
+										Path: "readiness",
+									},
+								},
+							},
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Port: intstr.FromString("probes"),
+										Path: "health",
 									},
 								},
 							},

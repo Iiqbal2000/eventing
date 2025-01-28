@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@ package ingress
 
 import (
 	"bytes"
+	"context"
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -25,21 +26,40 @@ import (
 	"testing"
 	"time"
 
+	filteredconfigmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/filtered/fake"
+	filteredFactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
+	"knative.dev/pkg/system"
+
+	"knative.dev/eventing/pkg/eventingtls"
+
 	"github.com/cloudevents/sdk-go/v2/client"
 	"github.com/cloudevents/sdk-go/v2/event"
 	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
 	"github.com/google/go-cmp/cmp"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/fake"
 
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"knative.dev/pkg/configmap"
+
+	reconcilertesting "knative.dev/pkg/reconciler/testing"
 
 	"knative.dev/eventing/pkg/apis/eventing"
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/broker"
-	reconcilertesting "knative.dev/pkg/reconciler/testing"
 
 	brokerinformerfake "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/broker/fake"
+	eventpolicyinformerfake "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy/fake"
+
+	_ "knative.dev/pkg/client/injection/kube/client/fake"
+	_ "knative.dev/pkg/client/injection/kube/informers/factory/filtered/fake"
+
+	// Fake injection client
+	_ "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy/fake"
 )
 
 const (
@@ -205,9 +225,9 @@ func TestHandler_ServeHTTP(t *testing.T) {
 			method:     nethttp.MethodPost,
 			uri:        "/ns/name",
 			body:       getValidEvent(),
-			statusCode: nethttp.StatusBadRequest,
+			statusCode: nethttp.StatusInternalServerError,
 			handler:    handler(),
-			reporter:   &mockReporter{StatusCode: nethttp.StatusBadRequest, EventDispatchTimeReported: false},
+			reporter:   &mockReporter{StatusCode: nethttp.StatusInternalServerError, EventDispatchTimeReported: false},
 			defaulter:  broker.TTLDefaulter(logger, 100),
 			brokers: []*eventingv1.Broker{
 				withUninitializedAnnotations(makeBroker("name", "ns")),
@@ -253,7 +273,8 @@ func TestHandler_ServeHTTP(t *testing.T) {
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx, _ := reconcilertesting.SetupFakeContext(t)
+			ctx, _ := reconcilertesting.SetupFakeContext(t, SetUpInformerSelector)
+			trustBundleConfigMapLister := filteredconfigmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector).Lister().ConfigMaps(system.Namespace())
 
 			s := httptest.NewServer(tc.handler)
 			defer s.Close()
@@ -281,7 +302,29 @@ func TestHandler_ServeHTTP(t *testing.T) {
 				brokerinformerfake.Get(ctx).Informer().GetStore().Add(b)
 			}
 
-			h, err := NewHandler(logger, &mockReporter{}, tc.defaulter, brokerinformerfake.Get(ctx))
+			tokenProvider := auth.NewOIDCTokenProvider(ctx)
+			authVerifier := auth.NewVerifier(ctx, eventpolicyinformerfake.Get(ctx).Lister(), trustBundleConfigMapLister, configmap.NewStaticWatcher(
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "config-features",
+						Namespace: "knative-eventing",
+					},
+					Data: map[string]string{
+						feature.OIDCAuthentication: string(feature.Enabled),
+					},
+				},
+			))
+
+			h, err := NewHandler(logger,
+				&mockReporter{},
+				tc.defaulter,
+				brokerinformerfake.Get(ctx),
+				authVerifier,
+				tokenProvider,
+				configmapinformer.Get(ctx).Lister().ConfigMaps("ns"),
+				func(ctx context.Context) context.Context {
+					return ctx
+				})
 			if err != nil {
 				t.Fatal("Unable to create receiver:", err)
 			}
@@ -379,4 +422,9 @@ func makeBroker(name, namespace string) *eventingv1.Broker {
 func withUninitializedAnnotations(b *eventingv1.Broker) *eventingv1.Broker {
 	b.Status.Annotations = nil
 	return b
+}
+
+func SetUpInformerSelector(ctx context.Context) context.Context {
+	ctx = filteredFactory.WithSelectors(ctx, eventingtls.TrustBundleLabelSelector)
+	return ctx
 }

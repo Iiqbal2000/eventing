@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -137,7 +137,7 @@ func (t *Tracker) Clean(awaitDeletion bool) error {
 			logf("Failed to clean the resource %q : %v", deleter.Name, err)
 		} else if awaitDeletion {
 			logf("Waiting for %s to be deleted", deleter.Name)
-			if err := wait.PollImmediate(interval, timeout, func() (bool, error) {
+			if err := wait.PollUntilContextTimeout(context.Background(), interval, timeout, true, func(ctx context.Context) (bool, error) {
 				if _, err := deleter.Resource.Get(context.Background(), deleter.Name, metav1.GetOptions{}); err != nil {
 					return true, nil
 				}

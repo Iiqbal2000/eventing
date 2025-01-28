@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,11 +50,6 @@ func (filter *prefixFilter) Filter(ctx context.Context, event cloudevents.Event)
 	if filter == nil {
 		return eventfilter.NoFilter
 	}
-	for attribute, value := range filter.filters {
-		if attribute == "" || value == "" {
-			return eventfilter.NoFilter
-		}
-	}
 	logger := logging.FromContext(ctx)
 	logger.Debugw("Performing a prefix match ", zap.Any("filters", filter.filters), zap.Any("event", event))
 	for k, v := range filter.filters {
@@ -64,9 +59,15 @@ func (filter *prefixFilter) Filter(ctx context.Context, event cloudevents.Event)
 				zap.Any("event", event))
 			return eventfilter.FailFilter
 		}
-		if !strings.HasPrefix(fmt.Sprintf("%v", value), v) {
+		var s string
+		if s, ok = value.(string); !ok {
+			s = fmt.Sprintf("%v", value)
+		}
+		if !strings.HasPrefix(s, v) {
 			return eventfilter.FailFilter
 		}
 	}
 	return eventfilter.PassFilter
 }
+
+func (filter *prefixFilter) Cleanup() {}
