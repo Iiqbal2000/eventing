@@ -30,6 +30,7 @@ rules:
       - list
       - watch
       - update
+      - knsubscribe
   - apiGroups:
       - messaging.knative.dev
     resources:
@@ -45,11 +46,19 @@ rules:
     verbs:
       - patch
   - apiGroups:
+      - eventing.knative.dev
+    resources:
+      - eventpolicies
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
       - ""
     resources:
       - services
       - serviceaccounts
-    verbs: &everything
+    verbs:
       - get
       - list
       - watch
@@ -68,12 +77,26 @@ rules:
       - "rbac.authorization.k8s.io"
     resources:
       - rolebindings
-    verbs: *everything
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+
   - apiGroups:
       - apps
     resources:
       - deployments
-    verbs: *everything
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+
   - apiGroups:
       - apps
     resources:
@@ -101,7 +124,14 @@ rules:
       - coordination.k8s.io
     resources:
       - leases
-    verbs: *everything
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+
 
   # For actually registering our webhook.
   - apiGroups:
@@ -109,7 +139,7 @@ rules:
     resources:
       - "mutatingwebhookconfigurations"
       - "validatingwebhookconfigurations"
-    verbs: &everything
+    verbs:
       - "get"
       - "list"
       - "create"

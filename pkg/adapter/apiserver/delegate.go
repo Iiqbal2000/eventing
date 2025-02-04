@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,7 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/client-go/tools/cache"
 	"knative.dev/eventing/pkg/adapter/apiserver/events"
+	"knative.dev/eventing/pkg/eventfilter"
 )
 
 type resourceDelegate struct {
@@ -31,6 +32,7 @@ type resourceDelegate struct {
 	source              string
 	ref                 bool
 	apiServerSourceName string
+	filter              eventfilter.Filter
 
 	logger *zap.SugaredLogger
 }
@@ -38,31 +40,36 @@ type resourceDelegate struct {
 var _ cache.Store = (*resourceDelegate)(nil)
 
 func (a *resourceDelegate) Add(obj interface{}) error {
-	ctx, event, err := events.MakeAddEvent(a.source, a.apiServerSourceName, obj, a.ref)
+	return a.handleKubernetesObject(events.MakeAddEvent, obj)
+}
+
+func (a *resourceDelegate) Update(obj interface{}) error {
+	return a.handleKubernetesObject(events.MakeUpdateEvent, obj)
+}
+
+func (a *resourceDelegate) Delete(obj interface{}) error {
+	return a.handleKubernetesObject(events.MakeDeleteEvent, obj)
+
+}
+
+// makeEventFunc represents the signature of the functions `events.Make*Event` so they can
+// be passed as a parameter
+type makeEventFunc func(string, string, interface{}, bool) (context.Context, cloudevents.Event, error)
+
+func (a *resourceDelegate) handleKubernetesObject(makeEvent makeEventFunc, obj interface{}) error {
+	ctx, event, err := makeEvent(a.source, a.apiServerSourceName, obj, a.ref)
+
 	if err != nil {
 		a.logger.Infow("event creation failed", zap.Error(err))
 		return err
 	}
-	a.sendCloudEvent(ctx, event)
-	return nil
-}
 
-func (a *resourceDelegate) Update(obj interface{}) error {
-	ctx, event, err := events.MakeUpdateEvent(a.source, a.apiServerSourceName, obj, a.ref)
-	if err != nil {
-		a.logger.Info("event creation failed", zap.Error(err))
-		return err
+	filterResult := a.filter.Filter(ctx, event)
+	if filterResult == eventfilter.FailFilter {
+		a.logger.Debugf("event type %s filtered out", event.Type())
+		return nil
 	}
-	a.sendCloudEvent(ctx, event)
-	return nil
-}
 
-func (a *resourceDelegate) Delete(obj interface{}) error {
-	ctx, event, err := events.MakeDeleteEvent(a.source, a.apiServerSourceName, obj, a.ref)
-	if err != nil {
-		a.logger.Info("event creation failed", zap.Error(err))
-		return err
-	}
 	a.sendCloudEvent(ctx, event)
 	return nil
 }

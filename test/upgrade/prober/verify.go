@@ -4,7 +4,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * 	http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -62,7 +62,7 @@ func (p *prober) Verify() (eventErrs []error, eventsSent int) {
 	}
 	p.log.Info("Waiting for complete report from receiver...")
 	start := time.Now()
-	if err := wait.PollImmediate(jobWaitInterval, jobWaitTimeout, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), jobWaitInterval, jobWaitTimeout, true, func(ctx context.Context) (bool, error) {
 		var err error
 		report, err = p.fetchReport()
 		if err != nil {
@@ -255,7 +255,8 @@ func (p *prober) deployFetcher() *batchv1.Job {
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app": fetcherName,
+						"app":                     fetcherName,
+						"sidecar.istio.io/inject": "true",
 					},
 					Annotations: map[string]string{
 						"sidecar.istio.io/inject":                "true",
@@ -326,7 +327,7 @@ func waitForJobToComplete(ctx context.Context, client kubernetes.Interface, jobN
 	span := logging.GetEmitableSpan(ctx, fmt.Sprint("waitForJobToComplete/", jobName))
 	defer span.End()
 
-	return wait.PollImmediate(jobWaitInterval, jobWaitTimeout, func() (bool, error) {
+	return wait.PollUntilContextTimeout(ctx, jobWaitInterval, jobWaitTimeout, true, func(ctx context.Context) (bool, error) {
 		j, err := jobs.Get(ctx, jobName, metav1.GetOptions{})
 		if err != nil {
 			return true, err

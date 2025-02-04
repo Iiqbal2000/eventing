@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,7 @@ package apiserver
 
 import (
 	"context"
-	"net/http"
+	"fmt"
 	"time"
 
 	cloudevents "github.com/cloudevents/sdk-go/v2"
@@ -33,6 +33,7 @@ import (
 
 	"knative.dev/eventing/pkg/adapter/v2"
 	v1 "knative.dev/eventing/pkg/apis/sources/v1"
+	"knative.dev/eventing/pkg/eventfilter/subscriptionsapi"
 )
 
 type envConfig struct {
@@ -70,6 +71,7 @@ func (a *apiServerAdapter) start(ctx context.Context, stopCh <-chan struct{}) er
 		logger:              a.logger,
 		ref:                 a.config.EventMode == v1.ReferenceMode,
 		apiServerSourceName: a.name,
+		filter:              subscriptionsapi.NewAllFilter(subscriptionsapi.MaterializeFiltersList(a.logger.Desugar(), a.config.Filters)...),
 	}
 	if a.config.ResourceOwner != nil {
 		a.logger.Infow("will be filtered",
@@ -88,8 +90,7 @@ func (a *apiServerAdapter) start(ctx context.Context, stopCh <-chan struct{}) er
 
 		resources, err := a.discover.ServerResourcesForGroupVersion(configRes.GVR.GroupVersion().String())
 		if err != nil {
-			a.logger.Errorf("Could not retrieve information about resource %s: %s", configRes.GVR.String(), err.Error())
-			continue
+			return fmt.Errorf("failed to retrieve information about resource %s: %v", configRes.GVR.String(), err)
 		}
 
 		exists := false
@@ -120,24 +121,12 @@ func (a *apiServerAdapter) start(ctx context.Context, stopCh <-chan struct{}) er
 		}
 
 		if !exists {
-			a.logger.Errorf("Could not retrieve information about resource %s: %s", configRes.GVR.String())
+			a.logger.Errorf("could not retrieve information about resource %s: it doesn't exist", configRes.GVR.String())
 		}
 	}
 
-	srv := &http.Server{
-		Addr: ":8080",
-		// Configure read header timeout to overcome potential Slowloris Attack because ReadHeaderTimeout is not
-		// configured in the http.Server.
-		ReadHeaderTimeout: 10 * time.Second,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}),
-	}
-	go srv.ListenAndServe()
-
 	<-stopCh
 	stop <- struct{}{}
-	srv.Shutdown(ctx)
 	return nil
 }
 

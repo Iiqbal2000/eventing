@@ -21,6 +21,7 @@ metadata:
     app.kubernetes.io/component: broker-ingress
     app.kubernetes.io/version: devel
     app.kubernetes.io/name: knative-eventing
+    bindings.knative.dev/exclude: "true"
 spec:
   selector:
     matchLabels:
@@ -39,7 +40,7 @@ spec:
       - name: ingress
         terminationMessagePolicy: FallbackToLogsOnError
         image: ko://knative.dev/eventing/cmd/broker/ingress
-        readinessProbe: &probe
+        readinessProbe:
           failureThreshold: 3
           httpGet:
             path: /healthz
@@ -49,7 +50,14 @@ spec:
           successThreshold: 1
           timeoutSeconds: 1
         livenessProbe:
-          <<: *probe
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 8080
+            scheme: HTTP
+          periodSeconds: 2
+          successThreshold: 1
+          timeoutSeconds: 1
           initialDelaySeconds: 5
         resources:
           requests:

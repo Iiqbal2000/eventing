@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/md5" //nolint:gosec
 	"fmt"
+	"time"
 
 	"github.com/cloudevents/sdk-go/v2/event"
 	"go.uber.org/zap"
@@ -28,18 +29,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	"knative.dev/eventing/pkg/apis/eventing/v1beta2"
+	"knative.dev/eventing/pkg/apis/eventing/v1beta3"
 	"knative.dev/eventing/pkg/apis/feature"
-	eventingv1beta2 "knative.dev/eventing/pkg/client/clientset/versioned/typed/eventing/v1beta2"
-	v1beta22 "knative.dev/eventing/pkg/client/listers/eventing/v1beta2"
+	eventingv1beta3 "knative.dev/eventing/pkg/client/clientset/versioned/typed/eventing/v1beta3"
+	v1beta33 "knative.dev/eventing/pkg/client/listers/eventing/v1beta3"
 	"knative.dev/eventing/pkg/utils"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
 )
 
 type EventTypeAutoHandler struct {
-	EventTypeLister v1beta22.EventTypeLister
-	EventingClient  eventingv1beta2.EventingV1beta2Interface
+	EventTypeLister v1beta33.EventTypeLister
+	EventingClient  eventingv1beta3.EventingV1beta3Interface
 	FeatureStore    *feature.Store
 	Logger          *zap.Logger
 }
@@ -52,55 +53,65 @@ func generateEventTypeName(name, namespace, eventType, eventSource string) strin
 }
 
 // AutoCreateEventType creates EventType object based on processed event's types from addressable KReference objects
-func (h *EventTypeAutoHandler) AutoCreateEventType(ctx context.Context, event *event.Event, addressable *duckv1.KReference, ownerUID types.UID) error {
+func (h *EventTypeAutoHandler) AutoCreateEventType(ctx context.Context, event *event.Event, addressable *duckv1.KReference, ownerUID types.UID) {
 	// Feature flag gate
 	if !h.FeatureStore.IsEnabled(feature.EvenTypeAutoCreate) {
 		h.Logger.Debug("Event Type auto creation is disabled")
-		return nil
-	}
-	h.Logger.Debug("Event Types auto creation is enabled")
-
-	eventTypeName := generateEventTypeName(addressable.Name, addressable.Namespace, event.Type(), event.Source())
-
-	exists, err := h.EventTypeLister.EventTypes(addressable.Namespace).Get(eventTypeName)
-	if err != nil && !apierrs.IsNotFound(err) {
-		h.Logger.Error("Failed to retrieve Even Type", zap.Error(err))
-		return err
-	}
-	if exists != nil {
-		return nil
+		return
 	}
 
-	source, _ := apis.ParseURL(event.Source())
-	schema, _ := apis.ParseURL(event.DataSchema())
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second*30)
+	go func() {
+		h.Logger.Debug("Event Types auto creation is enabled")
 
-	et := &v1beta2.EventType{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      eventTypeName,
-			Namespace: addressable.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				{
-					APIVersion: addressable.APIVersion,
-					Kind:       addressable.Kind,
-					Name:       addressable.Name,
-					UID:        ownerUID,
+		eventTypeName := generateEventTypeName(addressable.Name, addressable.Namespace, event.Type(), event.Source())
+
+		exists, err := h.EventTypeLister.EventTypes(addressable.Namespace).Get(eventTypeName)
+		if err != nil && !apierrs.IsNotFound(err) {
+			h.Logger.Error("Failed to retrieve Even Type", zap.Error(err))
+			cancel()
+			return
+		}
+		if exists != nil {
+			cancel()
+			return
+		}
+
+		source, _ := apis.ParseURL(event.Source())
+		schema, _ := apis.ParseURL(event.DataSchema())
+
+		et := &v1beta3.EventType{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      eventTypeName,
+				Namespace: addressable.Namespace,
+				OwnerReferences: []metav1.OwnerReference{
+					{
+						APIVersion: addressable.APIVersion,
+						Kind:       addressable.Kind,
+						Name:       addressable.Name,
+						UID:        ownerUID,
+					},
 				},
 			},
-		},
-		Spec: v1beta2.EventTypeSpec{
-			Type:        event.Type(),
-			Source:      source,
-			Schema:      schema,
-			SchemaData:  event.DataSchema(),
-			Reference:   addressable,
-			Description: "Event Type auto-created by controller",
-		},
-	}
+			Spec: v1beta3.EventTypeSpec{
+				Attributes: []v1beta3.EventAttributeDefinition{
+					{Name: "type", Value: event.Type(), Required: true},
+					{Name: "source", Value: source.String(), Required: true},
+					{Name: "schemadata", Value: schema.String(), Required: true},
+					{Name: "specversion", Value: event.SpecVersion(), Required: true},
+					{Name: "id", Required: true},
+				},
+				Reference:   addressable,
+				Description: "Event Type auto-created by controller",
+			},
+		}
 
-	_, err = h.EventingClient.EventTypes(et.Namespace).Create(ctx, et, metav1.CreateOptions{})
-	if err != nil && !apierrs.IsAlreadyExists(err) {
-		h.Logger.Error("Failed to create Event Type", zap.Error(err))
-		return err
-	}
-	return nil
+		_, err = h.EventingClient.EventTypes(et.Namespace).Create(ctx, et, metav1.CreateOptions{})
+		if err != nil && !apierrs.IsAlreadyExists(err) {
+			h.Logger.Error("Failed to create Event Type", zap.Error(err))
+			cancel()
+			return
+		}
+		cancel()
+	}()
 }

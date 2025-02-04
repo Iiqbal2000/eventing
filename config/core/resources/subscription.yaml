@@ -36,7 +36,7 @@ spec:
             type: object
             properties:
               channel:
-                description: 'Reference to a channel that will be used to create the subscription. You can specify only the following fields of the KReference: kind, apiVersion and name. The resource pointed by this KReference must meet the contract to the ChannelableSpec duck type. If the resource does not meet this contract it will be reflected in the Subscription''s status.  This field is immutable. We have no good answer on what happens to the events that are currently in the channel being consumed from and what the semantics there should be. For now, you can always delete the Subscription and recreate it to point to a different channel, giving the user more control over what semantics should be used (drain the channel first, possibly have events dropped, etc.)'
+                description: 'Reference to a channel that will be used to create the subscription. You can specify only the following fields of the KReference: kind, apiVersion, name and namespace. The resource pointed by this KReference must meet the contract to the ChannelableSpec duck type. If the resource does not meet this contract it will be reflected in the Subscription''s status.  This field is immutable. We have no good answer on what happens to the events that are currently in the channel being consumed from and what the semantics there should be. For now, you can always delete the Subscription and recreate it to point to a different channel, giving the user more control over what semantics should be used (drain the channel first, possibly have events dropped, etc.)'
                 type: object
                 properties:
                   apiVersion:
@@ -47,6 +47,9 @@ spec:
                     type: string
                   name:
                     description: 'Name of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                    type: string
+                  namespace:
+                    description: 'Namespace of the referent. More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/ This is optional field, it gets defaulted to the object holding it if left out.'
                     type: string
                 x-kubernetes-preserve-unknown-fields: true # This is necessary to enable the experimental feature
               delivery:
@@ -85,6 +88,9 @@ spec:
                       CACerts:
                         description: Certification Authority (CA) certificates in PEM format that the source trusts when sending events to the sink.
                         type: string
+                      audience:
+                        description: Audience is the OIDC audience. This only needs to be set if the target is not an Addressable and thus the Audience can't be received from the target itself. If specified, it takes precedence over the target's Audience.
+                        type: string
                   retry:
                     description: Retry is the minimum number of retries the sender should attempt when sending an event before moving it to the dead letter sink.
                     type: integer
@@ -116,6 +122,9 @@ spec:
                   CACerts:
                     description: Certification Authority (CA) certificates in PEM format that the source trusts when sending events to the sink.
                     type: string
+                  audience:
+                    description: Audience is the OIDC audience. This only needs to be set if the target is not an Addressable and thus the Audience can't be received from the target itself. If specified, it takes precedence over the target's Audience.
+                    type: string
               subscriber:
                 description: Subscriber is reference to (optional) function for processing events. Events from the Channel will be delivered here and replies are sent to a Destination as specified by the Reply.
                 type: object
@@ -143,6 +152,9 @@ spec:
                   CACerts:
                     description: Certification Authority (CA) certificates in PEM format that the subscription trusts when sending events to the sink.
                     type: string
+                  audience:
+                    description: Audience is the OIDC audience. This only needs to be set if the target is not an Addressable and thus the Audience can't be received from the target itself. If specified, it takes precedence over the target's Audience.
+                    type: string
           status:
             type: object
             properties:
@@ -150,6 +162,18 @@ spec:
                 description: Annotations is additional Status fields for the Resource to save some additional State as well as convey more information to the user. This is roughly akin to Annotations on any k8s resource, just the reconciler conveying richer information outwards.
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
+              auth:
+                description: Auth provides the relevant information for OIDC authentication.
+                type: object
+                properties:
+                  serviceAccountName:
+                    description: ServiceAccountName is the name of the generated service account used for this components OIDC authentication.
+                    type: string
+                  serviceAccountNames:
+                    description: ServiceAccountNames is the list of names of the generated service accounts used for this components OIDC authentication.
+                    type: array
+                    items:
+                      type: string
               conditions:
                 description: Conditions the latest available observations of a resource's current state.
                 type: array
@@ -191,17 +215,26 @@ spec:
                   deadLetterSinkCACerts:
                     description: Certification Authority (CA) certificates in PEM format according to https://www.rfc-editor.org/rfc/rfc7468.
                     type: string
+                  deadLetterSinkAudience:
+                    description: OIDC audience of the dead letter sink.
+                    type: string
                   replyUri:
                     description: ReplyURI is the fully resolved URI for the spec.reply.
                     type: string
                   replyCACerts:
                     description: Certification Authority (CA) certificates in PEM format according to https://www.rfc-editor.org/rfc/rfc7468.
                     type: string
+                  replyAudience:
+                    description: ReplyAudience is the OIDC audience for the replyUri.
+                    type: string
                   subscriberUri:
                     description: SubscriberURI is the fully resolved URI for spec.subscriber.
                     type: string
                   subscriberCACerts:
                     description: Certification Authority (CA) certificates in PEM format according to https://www.rfc-editor.org/rfc/rfc7468.
+                    type: string
+                  subscriberAudience:
+                    description: SubscriberAudience is the OIDC audience for the subscriberUri.
                     type: string
     additionalPrinterColumns:
     - name: Age

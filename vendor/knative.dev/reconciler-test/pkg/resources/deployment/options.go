@@ -26,6 +26,7 @@ var (
 	WithAnnotations    = manifest.WithAnnotations
 	WithLabels         = manifest.WithLabels
 	WithPodAnnotations = manifest.WithPodAnnotations
+	WithPodLabels      = manifest.WithPodLabels
 )
 
 func WithSelectors(selectors map[string]string) manifest.CfgFn {
@@ -71,5 +72,12 @@ func WithReplicas(replicas int) manifest.CfgFn {
 func WithPort(port int) manifest.CfgFn {
 	return func(cfg map[string]interface{}) {
 		cfg["port"] = port
+	}
+}
+
+func WithVolumes(volumes []corev1.Volume, mounts []corev1.VolumeMount) manifest.CfgFn {
+	return func(cfg map[string]interface{}) {
+		cfg["volumes"] = volumes
+		cfg["volumeMounts"] = mounts
 	}
 }

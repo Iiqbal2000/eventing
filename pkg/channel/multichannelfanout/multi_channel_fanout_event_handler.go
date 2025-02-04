@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,6 +35,7 @@ import (
 
 	"knative.dev/eventing/pkg/channel"
 	"knative.dev/eventing/pkg/channel/fanout"
+	"knative.dev/eventing/pkg/kncloudevents"
 )
 
 type MultiChannelEventHandler interface {
@@ -64,7 +65,7 @@ func NewEventHandler(_ context.Context, logger *zap.Logger) *EventHandler {
 
 // NewEventHandlerWithConfig creates a new Handler with the specified configuration. This is really meant for tests
 // where you want to apply a fully specified configuration for tests. Reconciler operates on single channel at a time.
-func NewEventHandlerWithConfig(_ context.Context, logger *zap.Logger, conf Config, reporter channel.StatsReporter, recvOptions ...channel.EventReceiverOptions) (*EventHandler, error) {
+func NewEventHandlerWithConfig(_ context.Context, logger *zap.Logger, conf Config, reporter channel.StatsReporter, eventDispatcher *kncloudevents.Dispatcher, recvOptions ...channel.EventReceiverOptions) (*EventHandler, error) {
 	handlers := make(map[string]fanout.EventHandler, len(conf.ChannelConfigs))
 
 	for _, cc := range conf.ChannelConfigs {
@@ -73,7 +74,7 @@ func NewEventHandlerWithConfig(_ context.Context, logger *zap.Logger, conf Confi
 			if key == "" {
 				continue
 			}
-			handler, err := fanout.NewFanoutEventHandler(logger, cc.FanoutConfig, reporter, cc.EventTypeHandler, cc.ChannelAddressable, cc.ChannelUID, recvOptions...)
+			handler, err := fanout.NewFanoutEventHandler(logger, cc.FanoutConfig, reporter, cc.EventTypeHandler, cc.ChannelAddressable, cc.ChannelUID, eventDispatcher, recvOptions...)
 			if err != nil {
 				logger.Error("Failed creating new fanout handler.", zap.Error(err))
 				return nil, err

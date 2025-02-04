@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,11 +20,23 @@ import (
 	"context"
 	"os"
 
+	sourcesv1alpha1 "knative.dev/eventing/pkg/apis/sources/v1alpha1"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
-	"knative.dev/eventing/pkg/apis/feature"
+	kubeclient "knative.dev/pkg/client/injection/kube/client"
+	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/filtered"
 
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	eventingv1beta3 "knative.dev/eventing/pkg/apis/eventing/v1beta3"
+	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/apis/sinks"
+	sinksv1alpha1 "knative.dev/eventing/pkg/apis/sinks/v1alpha1"
+	"knative.dev/eventing/pkg/auth"
+	"knative.dev/eventing/pkg/eventingtls"
+
+	filteredFactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
 	"knative.dev/pkg/configmap"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/injection"
@@ -54,7 +66,7 @@ import (
 	pingdefaultconfig "knative.dev/eventing/pkg/apis/sources/config"
 	sourcesv1 "knative.dev/eventing/pkg/apis/sources/v1"
 	sourcesv1beta2 "knative.dev/eventing/pkg/apis/sources/v1beta2"
-	sugar "knative.dev/eventing/pkg/apis/sugar"
+	"knative.dev/eventing/pkg/apis/sugar"
 	"knative.dev/eventing/pkg/reconciler/sinkbinding"
 
 	versionedscheme "knative.dev/eventing/pkg/client/clientset/versioned/scheme"
@@ -66,6 +78,8 @@ func init() {
 
 var ourTypes = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
 	// For group eventing.knative.dev.
+	// v1alpha1
+	eventingv1alpha1.SchemeGroupVersion.WithKind("EventPolicy"): &eventingv1alpha1.EventPolicy{},
 	// v1beta1
 	eventingv1beta1.SchemeGroupVersion.WithKind("EventType"): &eventingv1beta1.EventType{},
 	// v1beta2
@@ -80,6 +94,8 @@ var ourTypes = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
 	messagingv1.SchemeGroupVersion.WithKind("Subscription"): &messagingv1.Subscription{},
 
 	// For group sources.knative.dev.
+	// v1alpha1
+	sourcesv1alpha1.SchemeGroupVersion.WithKind("IntegrationSource"): &sourcesv1alpha1.IntegrationSource{},
 	// v1beta2
 	sourcesv1beta2.SchemeGroupVersion.WithKind("PingSource"): &sourcesv1beta2.PingSource{},
 	// v1
@@ -87,6 +103,11 @@ var ourTypes = map[schema.GroupVersionKind]resourcesemantics.GenericCRD{
 	sourcesv1.SchemeGroupVersion.WithKind("PingSource"):      &sourcesv1.PingSource{},
 	sourcesv1.SchemeGroupVersion.WithKind("SinkBinding"):     &sourcesv1.SinkBinding{},
 	sourcesv1.SchemeGroupVersion.WithKind("ContainerSource"): &sourcesv1.ContainerSource{},
+
+	// For group sinks.knative.dev.
+	// v1alpha1
+	sinksv1alpha1.SchemeGroupVersion.WithKind("JobSink"):         &sinksv1alpha1.JobSink{},
+	sinksv1alpha1.SchemeGroupVersion.WithKind("IntegrationSink"): &sinksv1alpha1.IntegrationSink{},
 
 	// For group flows.knative.dev
 	// v1
@@ -145,9 +166,17 @@ func NewValidationAdmissionController(ctx context.Context, cmw configmap.Watcher
 	featureStore := feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"))
 	featureStore.WatchConfigs(cmw)
 
+	k8s := kubeclient.Get(ctx)
+
 	// Decorate contexts with the current state of the config.
 	ctxFunc := func(ctx context.Context) context.Context {
-		return featureStore.ToContext(channelStore.ToContext(pingstore.ToContext(store.ToContext(ctx))))
+		return sinks.WithConfig(
+			featureStore.ToContext(
+				channelStore.ToContext(
+					pingstore.ToContext(store.ToContext(ctx)))),
+			&sinks.Config{
+				KubeClient: k8s,
+			})
 	}
 
 	return validation.NewAdmissionController(ctx,
@@ -194,7 +223,8 @@ func NewConfigValidationController(ctx context.Context, _ configmap.Watcher) *co
 
 func NewSinkBindingWebhook(opts ...psbinding.ReconcilerOption) injection.ControllerConstructor {
 	return func(ctx context.Context, cmw configmap.Watcher) *controller.Impl {
-		sbresolver := sinkbinding.WithContextFactory(ctx, func(types.NamespacedName) {})
+		trustBundleConfigMapLister := configmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector).Lister()
+		withContext := sinkbinding.WithContextFactory(ctx, trustBundleConfigMapLister, func(types.NamespacedName) {})
 
 		return psbinding.NewAdmissionController(ctx,
 
@@ -208,7 +238,7 @@ func NewSinkBindingWebhook(opts ...psbinding.ReconcilerOption) injection.Control
 			sinkbinding.ListAll,
 
 			// How to setup the context prior to invoking Do/Undo.
-			sbresolver,
+			withContext,
 			opts...,
 		)
 	}
@@ -235,6 +265,7 @@ func NewConversionController(ctx context.Context, cmw configmap.Watcher) *contro
 		sourcesv1_       = sourcesv1.SchemeGroupVersion.Version
 		eventingv1beta1_ = eventingv1beta1.SchemeGroupVersion.Version
 		eventingv1beta2_ = eventingv1beta2.SchemeGroupVersion.Version
+		eventingv1beta3_ = eventingv1beta3.SchemeGroupVersion.Version
 	)
 
 	return conversion.NewConversionController(ctx,
@@ -259,6 +290,7 @@ func NewConversionController(ctx context.Context, cmw configmap.Watcher) *contro
 				Zygotes: map[string]conversion.ConvertibleObject{
 					eventingv1beta1_: &eventingv1beta1.EventType{},
 					eventingv1beta2_: &eventingv1beta2.EventType{},
+					eventingv1beta3_: &eventingv1beta3.EventType{},
 				},
 			},
 		},
@@ -280,6 +312,11 @@ func main() {
 		// SecretName must match the name of the Secret created in the configuration.
 		SecretName: "eventing-webhook-certs",
 	})
+
+	ctx = filteredFactory.WithSelectors(ctx,
+		auth.OIDCLabelSelector,
+		eventingtls.TrustBundleLabelSelector,
+	)
 
 	sharedmain.WebhookMainWithContext(ctx, webhook.NameFromEnv(),
 		certificates.NewController,

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -65,7 +65,7 @@ func createApiServerSourceWithInvalidSpec(name string) func(ctx context.Context,
 
 		if err != nil {
 			// all good, error is expected
-			assert.EqualError(t, err, `admission webhook "validation.webhook.eventing.knative.dev" denied the request: validation failed: invalid value: Unknown: spec.mode`)
+			assert.ErrorContains(t, err, `admission webhook "validation.webhook.eventing.knative.dev" denied the request: validation failed: invalid value: Unknown: spec.mode`)
 		} else {
 			t.Error("expected ApiServerResource to reject invalid spec.")
 		}
@@ -82,7 +82,7 @@ func updateApiServerSourceWithInvalidSpec() func(ctx context.Context, t feature.
 
 		if err != nil {
 			// all good, error is expected
-			assert.EqualError(t, err, `admission webhook "validation.webhook.eventing.knative.dev" denied the request: validation failed: invalid value: Unknown: spec.mode`)
+			assert.ErrorContains(t, err, `admission webhook "validation.webhook.eventing.knative.dev" denied the request: validation failed: invalid value: Unknown: spec.mode`)
 		} else {
 			t.Error("expected ApiServerResource to reject invalid spec.")
 		}

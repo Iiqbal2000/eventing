@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,8 +21,11 @@ import (
 	"errors"
 	"fmt"
 
+	"knative.dev/eventing/pkg/client/listers/eventing/v1alpha1"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/pointer"
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/network"
 
@@ -92,6 +95,8 @@ type Reconciler struct {
 	eventDispatcherConfigStore *config.EventDispatcherConfigStore
 
 	uriResolver *resolver.URIResolver
+
+	eventPolicyLister v1alpha1.EventPolicyLister
 }
 
 // Check that our Reconciler implements Interface
@@ -178,8 +183,8 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, imc *v1.InMemoryChannel)
 		imc.Status.MarkDeadLetterSinkNotConfigured()
 	}
 
-	transportEncryptionFlags := feature.FromContext(ctx)
-	if transportEncryptionFlags.IsPermissiveTransportEncryption() {
+	featureFlags := feature.FromContext(ctx)
+	if featureFlags.IsPermissiveTransportEncryption() {
 		caCerts, err := r.getCaCerts()
 		if err != nil {
 			return err
@@ -194,7 +199,7 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, imc *v1.InMemoryChannel)
 		//   - http address with host-based routing
 		imc.Status.Addresses = []duckv1.Addressable{httpsAddress, httpAddress}
 		imc.Status.Address = &httpAddress
-	} else if transportEncryptionFlags.IsStrictTransportEncryption() {
+	} else if featureFlags.IsStrictTransportEncryption() {
 		// Strict mode: (only https addresses)
 		// - status.address https address with path-based routing
 		// - status.addresses:
@@ -212,7 +217,28 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, imc *v1.InMemoryChannel)
 		imc.Status.Address = &httpAddress
 	}
 
+	if featureFlags.IsOIDCAuthentication() {
+		audience := auth.GetAudience(v1.SchemeGroupVersion.WithKind("InMemoryChannel"), imc.ObjectMeta)
+
+		logging.FromContext(ctx).Debugw("Setting the imc audience", zap.String("audience", audience))
+		imc.Status.Address.Audience = &audience
+		for i := range imc.Status.Addresses {
+			imc.Status.Addresses[i].Audience = &audience
+		}
+	} else {
+		logging.FromContext(ctx).Debug("Clearing the imc audience as OIDC is not enabled")
+		imc.Status.Address.Audience = nil
+		for i := range imc.Status.Addresses {
+			imc.Status.Addresses[i].Audience = nil
+		}
+	}
+
 	imc.GetConditionSet().Manage(imc.GetStatus()).MarkTrue(v1.InMemoryChannelConditionAddressable)
+
+	err = auth.UpdateStatusWithEventPolicies(featureFlags, &imc.Status.AppliedEventPoliciesStatus, &imc.Status, r.eventPolicyLister, v1.SchemeGroupVersion.WithKind("InMemoryChannel"), imc.ObjectMeta)
+	if err != nil {
+		return fmt.Errorf("could not update InMemoryChannels status with EventPolicies: %v", err)
+	}
 
 	// Ok, so now the Dispatcher Deployment & Service have been created, we're golden since the
 	// dispatcher watches the Channel and where it needs to dispatch events to.
@@ -220,17 +246,17 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, imc *v1.InMemoryChannel)
 	return nil
 }
 
-func (r *Reconciler) getCaCerts() (string, error) {
+func (r *Reconciler) getCaCerts() (*string, error) {
 	// Getting the secret called "imc-dispatcher-tls" from system namespace
 	secret, err := r.secretLister.Secrets(r.systemNamespace).Get(eventingtls.IMCDispatcherServerTLSSecretName)
 	if err != nil {
-		return "", fmt.Errorf("failed to get CA certs from %s/%s: %w", r.systemNamespace, eventingtls.IMCDispatcherServerTLSSecretName, err)
+		return nil, fmt.Errorf("failed to get CA certs from %s/%s: %w", r.systemNamespace, eventingtls.IMCDispatcherServerTLSSecretName, err)
 	}
 	caCerts, ok := secret.Data[caCertsSecretKey]
 	if !ok {
-		return "", fmt.Errorf("failed to get CA certs from %s/%s: missing %s key", r.systemNamespace, eventingtls.IMCDispatcherServerTLSSecretName, caCertsSecretKey)
+		return nil, nil
 	}
-	return string(caCerts), nil
+	return pointer.String(string(caCerts)), nil
 }
 
 func (r *Reconciler) httpAddress(svc *corev1.Service) duckv1.Addressable {
@@ -242,12 +268,12 @@ func (r *Reconciler) httpAddress(svc *corev1.Service) duckv1.Addressable {
 	return httpAddress
 }
 
-func (r *Reconciler) httpsAddress(caCerts string, imc *v1.InMemoryChannel) duckv1.Addressable {
+func (r *Reconciler) httpsAddress(caCerts *string, imc *v1.InMemoryChannel) duckv1.Addressable {
 	// https address uses path-based routing
 	httpsAddress := duckv1.Addressable{
 		Name:    pointer.String("https"),
 		URL:     apis.HTTPS(fmt.Sprintf("%s.%s.svc.%s", dispatcherName, r.systemNamespace, network.GetClusterDomainName())),
-		CACerts: pointer.String(caCerts),
+		CACerts: caCerts,
 	}
 	httpsAddress.URL.Path = fmt.Sprintf("/%s/%s", imc.Namespace, imc.Name)
 	return httpsAddress

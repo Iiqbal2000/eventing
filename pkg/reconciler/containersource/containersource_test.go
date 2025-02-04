@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,10 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/auth"
+	"knative.dev/pkg/ptr"
 
 	"knative.dev/pkg/kmeta"
 	"knative.dev/pkg/tracker"
@@ -212,7 +216,7 @@ func TestAllCases(t *testing.T) {
 			},
 			Key: testNS + "/" + sourceName,
 			WantEvents: []string{
-				Eventf(corev1.EventTypeNormal, sourceReconciled, `ContainerSource reconciled: "%s/%s"`, testNS, sourceName),
+				Eventf(corev1.EventTypeNormal, "ContainerSourceReconciled", `ContainerSource reconciled: "%s/%s"`, testNS, sourceName),
 			},
 			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
 				Object: NewContainerSource(sourceName, testNS,
@@ -228,6 +232,47 @@ func TestAllCases(t *testing.T) {
 					), &conditionTrue)),
 				),
 			}},
+		}, {
+			Name: "OIDC: Containersource uses OIDC service account of sinkbinding",
+			Key:  testNS + "/" + sourceName,
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication: feature.Enabled,
+			}),
+			Objects: []runtime.Object{
+				NewContainerSource(sourceName, testNS,
+					WithContainerSourceUID(sourceUID),
+					WithContainerSourceSpec(makeContainerSourceSpec(sinkDest)),
+					WithContainerSourceObjectMetaGeneration(generation),
+				),
+				makeSinkBindingOIDC(NewContainerSource(sourceName, testNS,
+					WithContainerSourceSpec(makeContainerSourceSpec(sinkDest)),
+					WithContainerSourceUID(sourceUID),
+				), &conditionTrue),
+				makeDeployment(NewContainerSource(sourceName, testNS,
+					WithContainerSourceSpec(makeContainerSourceSpec(sinkDest)),
+					WithContainerSourceUID(sourceUID),
+				), &conditionTrue),
+			},
+			WantErr: false,
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewContainerSource(sourceName, testNS,
+					WithContainerSourceUID(sourceUID),
+					WithContainerSourceSpec(makeContainerSourceSpec(sinkDest)),
+					WithContainerSourceObjectMetaGeneration(generation),
+					WithInitContainerSourceConditions,
+					WithContainerSourceStatusObservedGeneration(generation),
+					WithContainerSourcePropagateSinkbindingStatus(makeSinkBindingStatusOIDC(&conditionTrue)),
+					WithContainerSourcePropagateReceiveAdapterStatus(makeDeployment(NewContainerSource(sourceName, testNS,
+						WithContainerSourceSpec(makeContainerSourceSpec(sinkDest)),
+						WithContainerSourceUID(sourceUID),
+					), &conditionTrue)),
+					WithInitContainerSourceConditions,
+					WithContainerSourceOIDCServiceAccountName(getOIDCServiceAccountNameForSinkbinding()),
+				),
+			}},
+			WantEvents: []string{
+				Eventf(corev1.EventTypeNormal, sourceReconciled, `ContainerSource reconciled: "%s/%s"`, testNS, sourceName),
+			},
 		},
 	}
 
@@ -235,11 +280,12 @@ func TestAllCases(t *testing.T) {
 	table.Test(t, MakeFactory(func(ctx context.Context, listers *Listers, cmw configmap.Watcher) controller.Reconciler {
 		ctx = addressable.WithDuck(ctx)
 		r := &Reconciler{
-			kubeClientSet:         fakekubeclient.Get(ctx),
-			eventingClientSet:     fakeeventingclient.Get(ctx),
-			containerSourceLister: listers.GetContainerSourceLister(),
-			deploymentLister:      listers.GetDeploymentLister(),
-			sinkBindingLister:     listers.GetSinkBindingLister(),
+			kubeClientSet:              fakekubeclient.Get(ctx),
+			eventingClientSet:          fakeeventingclient.Get(ctx),
+			containerSourceLister:      listers.GetContainerSourceLister(),
+			deploymentLister:           listers.GetDeploymentLister(),
+			sinkBindingLister:          listers.GetSinkBindingLister(),
+			trustBundleConfigMapLister: listers.GetConfigMapLister(),
 		}
 		return containersource.NewReconciler(ctx, logging.FromContext(ctx), fakeeventingclient.Get(ctx), listers.GetContainerSourceLister(), controller.GetEventRecorder(ctx), r)
 	},
@@ -272,6 +318,13 @@ func makeSinkBinding(source *sourcesv1.ContainerSource, ready *corev1.ConditionS
 	if ready != nil {
 		sb.Status = *makeSinkBindingStatus(ready)
 	}
+	return sb
+}
+
+func makeSinkBindingOIDC(source *sourcesv1.ContainerSource, ready *corev1.ConditionStatus) *sourcesv1.SinkBinding {
+	sb := makeSinkBinding(source, ready)
+	sb.Status = *makeSinkBindingStatusOIDC(ready)
+
 	return sb
 }
 
@@ -360,4 +413,20 @@ func makeSinkBindingStatus(ready *corev1.ConditionStatus) *sourcesv1.SinkBinding
 			},
 		},
 	}
+}
+
+func makeSinkBindingStatusOIDC(ready *corev1.ConditionStatus) *sourcesv1.SinkBindingStatus {
+	sbs := makeSinkBindingStatus(ready)
+	sbs.Auth = &duckv1.AuthStatus{
+		ServiceAccountName: ptr.String(getOIDCServiceAccountNameForSinkbinding()),
+	}
+
+	return sbs
+}
+
+func getOIDCServiceAccountNameForSinkbinding() string {
+	return auth.GetOIDCServiceAccountNameForResource(sourcesv1.SchemeGroupVersion.WithKind("SinkBinding"), metav1.ObjectMeta{
+		Name:      sinkBindingName,
+		Namespace: testNS,
+	})
 }

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"testing"
 
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+
 	fakeeventingclient "knative.dev/eventing/pkg/client/injection/client/fake"
 	fakedynamicclient "knative.dev/pkg/injection/clients/dynamicclient/fake"
 	"knative.dev/pkg/tracker"
@@ -35,6 +37,8 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	"knative.dev/eventing/pkg/apis/feature"
 	"knative.dev/eventing/pkg/client/injection/ducks/duck/v1/channelable"
 	"knative.dev/eventing/pkg/duck"
 	"knative.dev/pkg/apis"
@@ -53,17 +57,31 @@ import (
 )
 
 const (
-	testNS             = "test-namespace"
-	parallelName       = "test-parallel"
-	replyChannelName   = "reply-channel"
-	parallelGeneration = 79
+	testNS                 = "test-namespace"
+	parallelName           = "test-parallel"
+	replyChannelName       = "reply-channel"
+	parallelGeneration     = 79
+	readyEventPolicyName   = "test-event-policy-ready"
+	unreadyEventPolicyName = "test-event-policy-unready"
 )
 
 var (
 	subscriberGVK = metav1.GroupVersionKind{
 		Group:   "messaging.knative.dev",
 		Version: "v1",
-		Kind:    "Subscriber",
+		Kind:    "Subscription",
+	}
+
+	parallelGVK = metav1.GroupVersionKind{
+		Group:   "flows.knative.dev",
+		Version: "v1",
+		Kind:    "Parallel",
+	}
+
+	channelV1GVK = metav1.GroupVersionKind{
+		Group:   "messaging.knative.dev",
+		Version: "v1",
+		Kind:    "InMemoryChannel",
 	}
 )
 
@@ -137,6 +155,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
@@ -173,6 +192,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
@@ -209,6 +229,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
@@ -249,6 +270,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
@@ -289,6 +311,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
@@ -339,6 +362,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{
 						{
 							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
@@ -398,6 +422,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{
 						{
 							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
@@ -427,20 +452,23 @@ func TestAllBranches(t *testing.T) {
 						{Subscriber: createSubscriber(0)},
 					})))},
 			WantErr: false,
-			WantDeletes: []clientgotesting.DeleteActionImpl{{
-				ActionImpl: clientgotesting.ActionImpl{
-					Namespace: testNS,
-					Resource:  v1.SchemeGroupVersion.WithResource("subscriptions"),
+			WantUpdates: []clientgotesting.UpdateActionImpl{
+				{
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("subscriptions"),
+					},
+					Object: resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS,
+						WithFlowsParallelChannelTemplateSpec(imc),
+						WithFlowsParallelBranches([]v1.ParallelBranch{
+							{Subscriber: createSubscriber(1)},
+						}))),
 				},
-				Name: resources.ParallelBranchChannelName(parallelName, 0),
-			}},
+			},
 			WantCreates: []runtime.Object{
 				createChannel(parallelName),
 				createBranchChannel(parallelName, 0),
 				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
-					{Subscriber: createSubscriber(1)},
-				}))),
-				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
 					{Subscriber: createSubscriber(1)},
 				}))),
 			},
@@ -453,6 +481,7 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
@@ -550,12 +579,795 @@ func TestAllBranches(t *testing.T) {
 					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
 					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
 					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseOIDCDisabled(),
 					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
 						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
 						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
 					}})),
 			}},
+		}, {
+			Name: "Should provision applying EventPolicies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReady(),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+		}, {
+			Name: "Should mark as NotReady on unready EventPolicies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(unreadyEventPolicyName, testNS,
+					WithUnreadyEventPolicyCondition("", ""),
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesNotReady("EventPoliciesNotReady", fmt.Sprintf("event policies %s are not ready", unreadyEventPolicyName)),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+		}, {
+			Name: "should list only Ready EventPolicies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(unreadyEventPolicyName, testNS,
+					WithUnreadyEventPolicyCondition("", ""),
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesNotReady("EventPoliciesNotReady", fmt.Sprintf("event policies %s are not ready", unreadyEventPolicyName)),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+		}, {
+			Name: "AuthZ Enabled with single branch, with filter, no EventPolicies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					}))},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseNoPolicyAndOIDCEnabled(),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "AuthZ Enabled with single branch, with filter, with Parallel EventPolicy",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReady(),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "AuthZ Enabled two branches, no filters, no EventPolicy",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}))},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				createBranchChannel(parallelName, 1),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				resources.NewFilterSubscription(1, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				resources.NewSubscription(1, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 1), 1),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseNoPolicyAndOIDCEnabled(),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						},
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 1, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+						}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "AuthZ Enabled two branches, no filters, with EventPolicy",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				createBranchChannel(parallelName, 1),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				resources.NewFilterSubscription(1, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				resources.NewSubscription(1, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Subscriber: createSubscriber(0)},
+					{Subscriber: createSubscriber(1)},
+				}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 1), 1),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReady(),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						},
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 1, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+						}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		},
+		{
+			Name: "two branches, update: remove one branch, with AuthZ enabled and parallel doesn't have EventPolicies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+					}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						},
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 1, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+						},
+					})),
+
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				createBranchChannel(parallelName, 1),
+
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}))),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}))),
+
+				resources.NewSubscription(1, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}))),
+				resources.NewFilterSubscription(1, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}))),
+
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 1), 1),
+			},
+			WantErr: false,
+			WantDeletes: []clientgotesting.DeleteActionImpl{
+				{
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("subscriptions"),
+					},
+					Name: resources.ParallelSubscriptionName(parallelName, 1),
+				}, {
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("subscriptions"),
+					},
+					Name: resources.ParallelFilterSubscriptionName(parallelName, 1),
+				}, {
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("inmemorychannels"),
+					},
+					Name: resources.ParallelBranchChannelName(parallelName, 1),
+				}, {
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("eventpolicies"),
+					},
+					Name: resources.ParallelEventPolicyName(parallelName, resources.ParallelBranchChannelName(parallelName, 1)),
+				},
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+					}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseNoPolicyAndOIDCEnabled(),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "three branches, update: remove one branch, with AuthZ enabled and parallel doesn't have EventPolicies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						},
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 1, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+						},
+						{
+							FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 2, corev1.ConditionFalse),
+							FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 2, corev1.ConditionFalse),
+							SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 2, corev1.ConditionFalse),
+						},
+					})),
+
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				createBranchChannel(parallelName, 1),
+				createBranchChannel(parallelName, 2),
+
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+						{Subscriber: createSubscriber(2)},
+					}))),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+						{Subscriber: createSubscriber(2)},
+					}))),
+
+				resources.NewSubscription(1, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+						{Subscriber: createSubscriber(2)},
+					}))),
+				resources.NewFilterSubscription(1, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+						{Subscriber: createSubscriber(2)},
+					}))),
+				resources.NewSubscription(2, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+						{Subscriber: createSubscriber(2)},
+					}))),
+				resources.NewFilterSubscription(2, NewFlowsParallel(parallelName, testNS,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+						{Subscriber: createSubscriber(2)},
+					}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 1), 1),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 2), 2),
+			},
+			WantErr: false,
+			WantDeletes: []clientgotesting.DeleteActionImpl{
+				{
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("subscriptions"),
+					},
+					Name: resources.ParallelSubscriptionName(parallelName, 2),
+				}, {
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("subscriptions"),
+					},
+					Name: resources.ParallelFilterSubscriptionName(parallelName, 2),
+				}, {
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("inmemorychannels"),
+					},
+					Name: resources.ParallelBranchChannelName(parallelName, 2),
+				}, {
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("eventpolicies"),
+					},
+					Name: resources.ParallelEventPolicyName(parallelName, resources.ParallelBranchChannelName(parallelName, 2)),
+				},
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Subscriber: createSubscriber(0)},
+						{Subscriber: createSubscriber(1)},
+					}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReadyBecauseNoPolicyAndOIDCEnabled(),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}, {
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 1, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 1, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "Parallel Event Policy Deleted, corresponding Ingress Channel Policy should be deleted",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName+"-1"),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+			},
+			WantDeletes: []clientgotesting.DeleteActionImpl{
+				{
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+						Resource:  v1.SchemeGroupVersion.WithResource("eventpolicies"),
+					},
+					Name: resources.ParallelEventPolicyName(parallelName, readyEventPolicyName+"-1"),
+				},
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReady(),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "Parallel with multiple event policies",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+				NewEventPolicy(readyEventPolicyName+"-1", testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+				NewEventPolicy(readyEventPolicyName+"-2", testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName+"-1"),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName+"-2"),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReady(),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName, readyEventPolicyName+"-1", readyEventPolicyName+"-2"),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		}, {
+			Name: "Propagates Filter of Parallels EventPolicy to ingress channels EventPolicy",
+			Key:  pKey,
+			Objects: []runtime.Object{
+				NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{
+						{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+					})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(parallelGVK, parallelName),
+					WithEventPolicyFilter(eventingv1.SubscriptionsAPIFilter{
+						CESQL: "true",
+					}),
+				),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				createChannel(parallelName),
+				createBranchChannel(parallelName, 0),
+				resources.NewFilterSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				resources.NewSubscription(0, NewFlowsParallel(parallelName, testNS, WithFlowsParallelChannelTemplateSpec(imc), WithFlowsParallelBranches([]v1.ParallelBranch{
+					{Filter: createFilter(0), Subscriber: createSubscriber(0)},
+				}))),
+				makeEventPolicy(parallelName, resources.ParallelBranchChannelName(parallelName, 0), 0),
+				makeIngressChannelEventPolicy(parallelName, resources.ParallelChannelName(parallelName), readyEventPolicyName,
+					WithEventPolicyFilter(eventingv1.SubscriptionsAPIFilter{
+						CESQL: "true",
+					})),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewFlowsParallel(parallelName, testNS,
+					WithInitFlowsParallelConditions,
+					WithFlowsParallelChannelTemplateSpec(imc),
+					WithFlowsParallelBranches([]v1.ParallelBranch{{Filter: createFilter(0), Subscriber: createSubscriber(0)}}),
+					WithFlowsParallelChannelsNotReady("ChannelsNotReady", "Channels are not ready yet, or there are none"),
+					WithFlowsParallelAddressableNotReady("emptyAddress", "addressable is nil"),
+					WithFlowsParallelSubscriptionsNotReady("SubscriptionsNotReady", "Subscriptions are not ready yet, or there are none"),
+					WithFlowsParallelIngressChannelStatus(createParallelChannelStatus(parallelName, corev1.ConditionFalse)),
+					WithFlowsParallelEventPoliciesReady(),
+					WithFlowsParallelEventPoliciesListed(readyEventPolicyName),
+					WithFlowsParallelBranchStatuses([]v1.ParallelBranchStatus{{
+						FilterSubscriptionStatus: createParallelFilterSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+						FilterChannelStatus:      createParallelBranchChannelStatus(parallelName, 0, corev1.ConditionFalse),
+						SubscriptionStatus:       createParallelSubscriptionStatus(parallelName, 0, corev1.ConditionFalse),
+					}})),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
 		},
 	}
 
@@ -568,6 +1380,7 @@ func TestAllBranches(t *testing.T) {
 			subscriptionLister: listers.GetSubscriptionLister(),
 			eventingClientSet:  fakeeventingclient.Get(ctx),
 			dynamicClientSet:   fakedynamicclient.Get(ctx),
+			eventPolicyLister:  listers.GetEventPolicyLister(),
 		}
 		return parallel.NewReconciler(ctx, logging.FromContext(ctx),
 			fakeeventingclient.Get(ctx), listers.GetParallelLister(),
@@ -736,4 +1549,51 @@ func createDelivery(gvk metav1.GroupVersionKind, name, namespace string) *eventi
 			},
 		},
 	}
+}
+
+func makeEventPolicy(parallelName, channelName string, branch int, opts ...EventPolicyOption) *eventingv1alpha1.EventPolicy {
+	ep := NewEventPolicy(resources.ParallelEventPolicyName(parallelName, channelName), testNS,
+		WithEventPolicyToRef(channelV1GVK, channelName),
+		// from a subscription
+		WithEventPolicyFrom(subscriberGVK, resources.ParallelFilterSubscriptionName(parallelName, branch), testNS),
+		WithEventPolicyOwnerReferences([]metav1.OwnerReference{
+			{
+				APIVersion: "flows.knative.dev/v1",
+				Kind:       "Parallel",
+				Name:       parallelName,
+			},
+		}...),
+		WithEventPolicyLabels(resources.LabelsForParallelChannelsEventPolicy(parallelName)),
+	)
+
+	for _, opt := range opts {
+		opt(ep)
+	}
+
+	return ep
+}
+
+func makeIngressChannelEventPolicy(parallelName, channelName, parallelEventPolicyName string, opts ...EventPolicyOption) *eventingv1alpha1.EventPolicy {
+	ep := NewEventPolicy(resources.ParallelEventPolicyName(parallelName, parallelEventPolicyName), testNS,
+		WithEventPolicyToRef(channelV1GVK, channelName),
+		// from a subscription
+		WithEventPolicyOwnerReferences([]metav1.OwnerReference{
+			{
+				APIVersion: "flows.knative.dev/v1",
+				Kind:       "Parallel",
+				Name:       parallelName,
+			}, {
+				APIVersion: "eventing.knative.dev/v1alpha1",
+				Kind:       "EventPolicy",
+				Name:       parallelEventPolicyName,
+			},
+		}...),
+		WithEventPolicyLabels(resources.LabelsForParallelChannelsEventPolicy(parallelName)),
+	)
+
+	for _, opt := range opts {
+		opt(ep)
+	}
+
+	return ep
 }

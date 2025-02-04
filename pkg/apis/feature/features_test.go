@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,8 +22,9 @@ import (
 	"github.com/stretchr/testify/require"
 	_ "knative.dev/pkg/system/testing"
 
-	. "knative.dev/eventing/pkg/apis/feature"
 	. "knative.dev/pkg/configmap/testing"
+
+	. "knative.dev/eventing/pkg/apis/feature"
 )
 
 func TestFlags_IsEnabled_NilMap(t *testing.T) {
@@ -55,4 +56,21 @@ func TestGetFlags(t *testing.T) {
 	require.True(t, flags.IsAllowed("my-enabled-flag"))
 	require.True(t, flags.IsAllowed("my-allowed-flag"))
 	require.False(t, flags.IsAllowed("non-disabled-flag"))
+	require.True(t, flags.IsAuthorizationDefaultModeSameNamespace())
+
+	nodeSelector := flags.NodeSelector()
+	expectedNodeSelector := map[string]string{"testkey": "testvalue", "testkey1": "testvalue1", "testkey2": "testvalue2"}
+	require.Equal(t, expectedNodeSelector, nodeSelector)
+
+	require.Equal(t, flags.OIDCDiscoveryBaseURL(), "https://oidc.eks.eu-west-1.amazonaws.com/id/1")
+}
+
+func TestShouldNotOverrideDefaults(t *testing.T) {
+	f, err := NewFlagsConfigFromMap(map[string]string{})
+	require.Nil(t, err)
+	require.NotNil(t, f)
+
+	if !f.IsDisabled(KReferenceGroup) && !f.IsEnabled(KReferenceGroup) {
+		t.Errorf("Expected default value for %s in flags %+v", KReferenceGroup, f)
+	}
 }

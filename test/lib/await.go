@@ -4,7 +4,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * 	http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@
 package lib
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,7 +64,7 @@ func AwaitForAll(log *zap.SugaredLogger) error {
 
 // WaitForReadiness will wait until readiness endpoint reports OK
 func WaitForReadiness(port int, log *zap.SugaredLogger) error {
-	return wait.PollImmediate(10*time.Millisecond, 5*time.Minute, func() (done bool, err error) {
+	return wait.PollUntilContextTimeout(context.Background(), 10*time.Millisecond, 5*time.Minute, true, func(ctx context.Context) (done bool, err error) {
 		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/healthz", port))
 		if err != nil {
 			log.Debugf("Error while connecting: %v", err)

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,10 +21,14 @@ import (
 	"fmt"
 	"log"
 
+	eventpolicyinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1alpha1/eventpolicy"
+
 	"github.com/google/uuid"
 	"github.com/kelseyhightower/envconfig"
 	"go.uber.org/zap"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
+	configmapinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/configmap/filtered"
+	filteredFactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
 	configmap "knative.dev/pkg/configmap/informer"
 	"knative.dev/pkg/controller"
 	"knative.dev/pkg/injection"
@@ -38,8 +42,15 @@ import (
 
 	"knative.dev/eventing/cmd/broker"
 	"knative.dev/eventing/pkg/apis/feature"
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/broker/filter"
+	eventingclient "knative.dev/eventing/pkg/client/injection/client"
+	brokerinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/broker"
 	triggerinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/trigger"
+	eventtypeinformer "knative.dev/eventing/pkg/client/injection/informers/eventing/v1beta3/eventtype"
+	subscriptioninformer "knative.dev/eventing/pkg/client/injection/informers/messaging/v1/subscription"
+	"knative.dev/eventing/pkg/eventingtls"
+	"knative.dev/eventing/pkg/eventtype"
 	"knative.dev/eventing/pkg/reconciler/names"
 )
 
@@ -64,6 +75,7 @@ func main() {
 	metrics.MemStatsOrDie(ctx)
 
 	cfg := injection.ParseAndGetRESTConfigOrDie()
+	ctx = injection.WithConfig(ctx, cfg)
 
 	var env envConfig
 	if err := envconfig.Process("", &env); err != nil {
@@ -74,7 +86,13 @@ func main() {
 	log.Printf("Registering %d informer factories", len(injection.Default.GetInformerFactories()))
 	log.Printf("Registering %d informers", len(injection.Default.GetInformers()))
 
+	ctx = filteredFactory.WithSelectors(ctx,
+		auth.OIDCLabelSelector,
+		eventingtls.TrustBundleLabelSelector,
+	)
+
 	ctx, informers := injection.Default.SetupInformers(ctx, cfg)
+	ctx = injection.WithConfig(ctx, cfg)
 	kubeClient := kubeclient.Get(ctx)
 
 	loggingConfig, err := broker.GetLoggingConfig(ctx, system.Namespace(), logging.ConfigMapName())
@@ -102,7 +120,23 @@ func main() {
 	// Watch the observability config map and dynamically update request logs.
 	configMapWatcher.Watch(logging.ConfigMapName(), logging.UpdateLevelFromConfigMap(sl, atomicLevel, component))
 
-	featureStore := feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"))
+	trustBundleConfigMapLister := configmapinformer.Get(ctx, eventingtls.TrustBundleLabelSelector).Lister().ConfigMaps(system.Namespace())
+
+	var featureStore *feature.Store
+	var handler *filter.Handler
+
+	featureStore = feature.NewStore(logging.FromContext(ctx).Named("feature-config-store"), func(name string, value interface{}) {
+		featureFlags := value.(feature.Flags)
+		if featureFlags.IsEnabled(feature.EvenTypeAutoCreate) && featureStore != nil && handler != nil {
+			autoCreate := &eventtype.EventTypeAutoHandler{
+				EventTypeLister: eventtypeinformer.Get(ctx).Lister(),
+				EventingClient:  eventingclient.Get(ctx).EventingV1beta3(),
+				FeatureStore:    featureStore,
+				Logger:          logger,
+			}
+			handler.EventTypeCreator = autoCreate
+		}
+	})
 	featureStore.WatchConfigs(configMapWatcher)
 
 	// Decorate contexts with the current state of the feature config.
@@ -118,9 +152,11 @@ func main() {
 
 	reporter := filter.NewStatsReporter(env.ContainerName, kmeta.ChildName(env.PodName, uuid.New().String()))
 
+	oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
 	// We are running both the receiver (takes messages in from the Broker) and the dispatcher (send
 	// the messages to the triggers' subscribers) in this binary.
-	handler, err := filter.NewHandler(logger, triggerinformer.Get(ctx), reporter, ctxFunc)
+	authVerifier := auth.NewVerifier(ctx, eventpolicyinformer.Get(ctx).Lister(), trustBundleConfigMapLister, configMapWatcher)
+	handler, err = filter.NewHandler(logger, authVerifier, oidcTokenProvider, triggerinformer.Get(ctx), brokerinformer.Get(ctx), subscriptioninformer.Get(ctx), reporter, trustBundleConfigMapLister, ctxFunc)
 	if err != nil {
 		logger.Fatal("Error creating Handler", zap.Error(err))
 	}

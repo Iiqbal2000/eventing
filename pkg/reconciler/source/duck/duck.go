@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -39,6 +39,10 @@ import (
 	clientset "knative.dev/eventing/pkg/client/clientset/versioned"
 	listers "knative.dev/eventing/pkg/client/listers/eventing/v1beta2"
 	"knative.dev/eventing/pkg/reconciler/source/duck/resources"
+)
+
+const (
+	defaultNamespace = "default"
 )
 
 type Reconciler struct {
@@ -228,7 +232,7 @@ func (r *Reconciler) computeDiff(current []v1beta2.EventType, expected []v1beta2
 		if c, ok := currentMap[keyFromEventType(&e)]; !ok {
 			toCreate = append(toCreate, e)
 		} else {
-			if !equality.Semantic.DeepEqual(e.Spec, c.Spec) {
+			if !equality.Semantic.DeepDerivative(e.Spec, c.Spec) {
 				toDelete = append(toDelete, c)
 				toCreate = append(toCreate, e)
 			}

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	v1 "k8s.io/client-go/listers/core/v1"
 
 	"go.uber.org/zap"
 
@@ -41,7 +43,9 @@ import (
 
 	"knative.dev/eventing/pkg/adapter/mtping"
 	"knative.dev/eventing/pkg/adapter/v2"
+	"knative.dev/eventing/pkg/apis/feature"
 	sourcesv1 "knative.dev/eventing/pkg/apis/sources/v1"
+	"knative.dev/eventing/pkg/auth"
 	pingsourcereconciler "knative.dev/eventing/pkg/client/injection/reconciler/sources/v1/pingsource"
 	"knative.dev/eventing/pkg/reconciler/pingsource/resources"
 	reconcilersource "knative.dev/eventing/pkg/reconciler/source"
@@ -74,6 +78,8 @@ type Reconciler struct {
 
 	// Leader election configuration for the mt receive adapter
 	leConfig string
+
+	serviceAccountLister v1.ServiceAccountLister
 }
 
 // Check that our Reconciler implements ReconcileKind
@@ -97,6 +103,14 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, source *sourcesv1.PingSo
 			//TODO how does this work with deprecated fields
 			dest.Ref.Namespace = source.GetNamespace()
 		}
+	}
+
+	// OIDC authentication
+	featureFlags := feature.FromContext(ctx)
+	if err := auth.SetupOIDCServiceAccount(ctx, featureFlags, r.serviceAccountLister, r.kubeClientSet, sourcesv1.SchemeGroupVersion.WithKind("PingSource"), source.ObjectMeta, &source.Status, func(as *duckv1.AuthStatus) {
+		source.Status.Auth = as
+	}); err != nil {
+		return err
 	}
 
 	sinkAddr, err := r.sinkResolver.AddressableFromDestinationV1(ctx, *dest, source)
@@ -132,6 +146,13 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, source *sourcesv1.PingSo
 		Source: sourcesv1.PingSourceSource(source.Namespace, source.Name),
 	}}
 
+	return nil
+}
+
+func (r *Reconciler) FinalizeKind(ctx context.Context, source *sourcesv1.PingSource) pkgreconciler.Event {
+	logging.FromContext(ctx).Info("Deleting source")
+	// Allow for eventtypes to be cleaned up
+	source.Status.CloudEventAttributes = []duckv1.CloudEventAttributes{}
 	return nil
 }
 

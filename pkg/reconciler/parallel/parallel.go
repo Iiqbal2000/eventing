@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,14 +37,19 @@ import (
 	pkgreconciler "knative.dev/pkg/reconciler"
 
 	duckv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
+	"knative.dev/eventing/pkg/apis/feature"
 	v1 "knative.dev/eventing/pkg/apis/flows/v1"
 	messagingv1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/auth"
 	clientset "knative.dev/eventing/pkg/client/clientset/versioned"
 	parallelreconciler "knative.dev/eventing/pkg/client/injection/reconciler/flows/v1/parallel"
+	eventingv1alpha1listers "knative.dev/eventing/pkg/client/listers/eventing/v1alpha1"
 	listers "knative.dev/eventing/pkg/client/listers/flows/v1"
 	messaginglisters "knative.dev/eventing/pkg/client/listers/messaging/v1"
 	ducklib "knative.dev/eventing/pkg/duck"
 	"knative.dev/eventing/pkg/reconciler/parallel/resources"
+	"knative.dev/pkg/kmp"
 )
 
 type Reconciler struct {
@@ -58,6 +63,8 @@ type Reconciler struct {
 
 	// dynamicClientSet allows us to configure pluggable Build objects
 	dynamicClientSet dynamic.Interface
+
+	eventPolicyLister eventingv1alpha1listers.EventPolicyLister
 }
 
 // Check that our Reconciler implements parallelreconciler.Interface
@@ -71,6 +78,8 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, p *v1.Parallel) pkgrecon
 	//     2.2 create a Subscription to the filter Channel, subscribe the subscriber and send reply to
 	//         either the branch Reply. If not present, send reply to the global Reply. If not present, do not send reply.
 	// 3. Rinse and repeat step #2 above for each branch in the list
+	featureFlags := feature.FromContext(ctx)
+
 	if p.Status.BranchStatuses == nil {
 		p.Status.BranchStatuses = make([]v1.ParallelBranchStatus, 0)
 	}
@@ -135,6 +144,16 @@ func (r *Reconciler) ReconcileKind(ctx context.Context, p *v1.Parallel) pkgrecon
 
 	if err := r.removeUnwantedSubscriptions(ctx, p, append(filterSubs, subs...)); err != nil {
 		return fmt.Errorf("error removing unwanted Subscriptions: %w", err)
+	}
+
+	// Reconcile EventPolicies for the parallel.
+	if err := r.reconcileEventPolicies(ctx, p, ingressChannel, channels, filterSubs, featureFlags); err != nil {
+		return fmt.Errorf("failed to reconcile EventPolicies for Parallel: %w", err)
+	}
+
+	err := auth.UpdateStatusWithEventPolicies(featureFlags, &p.Status.AppliedEventPoliciesStatus, &p.Status, r.eventPolicyLister, v1.SchemeGroupVersion.WithKind("Parallel"), p.ObjectMeta)
+	if err != nil {
+		return fmt.Errorf("could not update parallel status with EventPolicies: %v", err)
 	}
 
 	return nil
@@ -216,7 +235,7 @@ func (r *Reconciler) reconcileSubscription(ctx context.Context, branchNumber int
 		// TODO: Send events here, or elsewhere?
 		//r.Recorder.Eventf(p, corev1.EventTypeWarning, subscriptionCreateFailed, "Create Parallels's subscription failed: %v", err)
 		return nil, fmt.Errorf("failed to get Subscription: %s", err)
-	} else if !equality.Semantic.DeepDerivative(expected.Spec, sub.Spec) {
+	} else if immutableFieldsChanged := expected.CheckImmutableFields(ctx, sub); immutableFieldsChanged != nil {
 		// Given that spec.channel is immutable, we cannot just update the subscription. We delete
 		// it instead, and re-create it.
 		err = r.eventingClientSet.MessagingV1().Subscriptions(sub.Namespace).Delete(ctx, sub.Name, metav1.DeleteOptions{})
@@ -230,6 +249,13 @@ func (r *Reconciler) reconcileSubscription(ctx context.Context, branchNumber int
 			return nil, err
 		}
 		return newSub, nil
+	} else if equal, err := kmp.SafeEqual(sub.Spec, expected.Spec); !equal || err != nil {
+		updatedSub, err := r.eventingClientSet.MessagingV1().Subscriptions(sub.Namespace).Update(ctx, expected, metav1.UpdateOptions{})
+		if err != nil {
+			logging.FromContext(ctx).Infow("Cannot update subscription", zap.Error(err))
+			return nil, err
+		}
+		return updatedSub, nil
 	}
 	return sub, nil
 }
@@ -329,4 +355,142 @@ func (r *Reconciler) removeUnwantedSubscriptions(ctx context.Context, p *v1.Para
 	}
 
 	return nil
+}
+
+func (r *Reconciler) reconcileEventPolicies(ctx context.Context, p *v1.Parallel, ingressChannel *duckv1.Channelable,
+	channels []*duckv1.Channelable, filterSubs []*messagingv1.Subscription, featureFlags feature.Flags) error {
+
+	if !featureFlags.IsOIDCAuthentication() {
+		return r.cleanupAllEventPolicies(ctx, p)
+	}
+	// list all the existing event policies for the parallel.
+	existingPolicies, err := r.listEventPoliciesForParallel(p)
+	if err != nil {
+		return fmt.Errorf("failed to list existing event policies for parallel: %w", err)
+	}
+	// make a map of existing event policies for easy and efficient lookup.
+	existingPolicyMap := make(map[string]*eventingv1alpha1.EventPolicy)
+	for _, policy := range existingPolicies {
+		existingPolicyMap[policy.Name] = policy
+	}
+
+	// prepare the list of event policies to create, update and delete.
+	var policiesToCreate, policiesToUpdate []*eventingv1alpha1.EventPolicy
+	policiesToDelete := make([]*eventingv1alpha1.EventPolicy, 0, len(existingPolicyMap))
+
+	for i, channel := range channels {
+		filterSub := filterSubs[i]
+		expectedPolicy := resources.MakeEventPolicyForParallelChannel(p, channel, filterSub)
+		if existingPolicy, ok := existingPolicyMap[expectedPolicy.Name]; ok {
+			if !equality.Semantic.DeepDerivative(expectedPolicy, existingPolicy) {
+				expectedPolicy.SetResourceVersion(existingPolicy.ResourceVersion)
+				policiesToUpdate = append(policiesToUpdate, expectedPolicy)
+			}
+			delete(existingPolicyMap, expectedPolicy.Name)
+		} else {
+			policiesToCreate = append(policiesToCreate, expectedPolicy)
+		}
+	}
+
+	// prepare the event policies for the ingress channel.
+	ingressChannelEventPolicies, err := r.prepareIngressChannelEventpolicies(p, ingressChannel)
+	if err != nil {
+		return fmt.Errorf("failed to prepare event policies for ingress channel: %w", err)
+	}
+
+	for _, policy := range ingressChannelEventPolicies {
+		if existingIngressChannelPolicy, ok := existingPolicyMap[policy.Name]; ok {
+			if !equality.Semantic.DeepDerivative(policy, existingIngressChannelPolicy) {
+				policy.SetResourceVersion(existingIngressChannelPolicy.ResourceVersion)
+				policiesToUpdate = append(policiesToUpdate, policy)
+			}
+			delete(existingPolicyMap, policy.Name)
+		} else {
+			policiesToCreate = append(policiesToCreate, policy)
+		}
+	}
+
+	// delete the remaining event policies in the map.
+	for _, policy := range existingPolicyMap {
+		policiesToDelete = append(policiesToDelete, policy)
+	}
+
+	// now that we have the list of event policies to create, update and delete, we can perform the operations.
+	if err := r.createEventPolicies(ctx, policiesToCreate); err != nil {
+		return fmt.Errorf("failed to create event policies: %w", err)
+	}
+	if err := r.updateEventPolicies(ctx, policiesToUpdate); err != nil {
+		return fmt.Errorf("failed to update event policies: %w", err)
+	}
+	if err := r.deleteEventPolicies(ctx, policiesToDelete); err != nil {
+		return fmt.Errorf("failed to delete event policies: %w", err)
+	}
+
+	return nil
+}
+
+func (r *Reconciler) createEventPolicies(ctx context.Context, policies []*eventingv1alpha1.EventPolicy) error {
+	for _, policy := range policies {
+		_, err := r.eventingClientSet.EventingV1alpha1().EventPolicies(policy.Namespace).Create(ctx, policy, metav1.CreateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) updateEventPolicies(ctx context.Context, policies []*eventingv1alpha1.EventPolicy) error {
+	for _, policy := range policies {
+		_, err := r.eventingClientSet.EventingV1alpha1().EventPolicies(policy.Namespace).Update(ctx, policy, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) deleteEventPolicies(ctx context.Context, policies []*eventingv1alpha1.EventPolicy) error {
+	for _, policy := range policies {
+		err := r.eventingClientSet.EventingV1alpha1().EventPolicies(policy.Namespace).Delete(ctx, policy.Name, metav1.DeleteOptions{})
+		if err != nil && !apierrs.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Reconciler) prepareIngressChannelEventpolicies(p *v1.Parallel, ingressChannel *duckv1.Channelable) ([]*eventingv1alpha1.EventPolicy, error) {
+	applyingEventPoliciesForParallel, err := auth.GetEventPoliciesForResource(r.eventPolicyLister, v1.SchemeGroupVersion.WithKind("Parallel"), p.ObjectMeta)
+	if err != nil {
+		return nil, fmt.Errorf("could not get EventPolicies for Parallel %s/%s: %w", p.Namespace, p.Name, err)
+	}
+
+	if len(applyingEventPoliciesForParallel) == 0 {
+		return nil, nil
+	}
+
+	ingressChannelEventPolicies := make([]*eventingv1alpha1.EventPolicy, 0, len(applyingEventPoliciesForParallel))
+	for _, eventPolicy := range applyingEventPoliciesForParallel {
+		ingressChannelEventPolicies = append(ingressChannelEventPolicies, resources.MakeEventPolicyForParallelIngressChannel(p, ingressChannel, eventPolicy))
+	}
+
+	return ingressChannelEventPolicies, nil
+}
+
+func (r *Reconciler) cleanupAllEventPolicies(ctx context.Context, p *v1.Parallel) error {
+	// list all the event policies for the parallel.
+	eventPolicies, err := r.listEventPoliciesForParallel(p)
+	if err != nil {
+		return err
+	}
+	return r.deleteEventPolicies(ctx, eventPolicies)
+}
+
+// listEventPoliciesForParallel lists all EventPolicies (e.g. the policies for the input channel and the intermediate channels)
+// created during reconcileKind that are associated with the given Parallel.
+func (r *Reconciler) listEventPoliciesForParallel(p *v1.Parallel) ([]*eventingv1alpha1.EventPolicy, error) {
+	labelSelector := labels.SelectorFromSet(map[string]string{
+		resources.ParallelChannelEventPolicyLabelPrefix + "parallel-name": p.Name,
+	})
+	return r.eventPolicyLister.EventPolicies(p.Namespace).List(labelSelector)
 }

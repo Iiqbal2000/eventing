@@ -109,8 +109,20 @@ backend asynchronously.
 #### Kafka Reporter
 High performance Reporter transporting Spans to the Zipkin server using a Kafka
 Producer digesting JSON V2 Spans. The reporter uses the
-[Sarama async producer](https://godoc.org/github.com/Shopify/sarama#AsyncProducer)
+[Sarama async producer](https://pkg.go.dev/github.com/IBM/sarama#AsyncProducer)
 underneath.
 
-## usage and examples
+## Usage and Examples
 [HTTP Server Example](examples/httpserver_test.go)
+
+## Go Support Policy
+
+zipkin-go follows the same version policy as Go's [Release Policy](https://go.dev/doc/devel/release):
+two versions. zipkin-go will ensure these versions work and bugs are valid if
+there's an issue with a current Go version.
+
+Additionally, zipkin-go intentionally delays usage of language or standard
+library features one additional version. For example, when Go 1.29 is released,
+zipkin-go can use language features or standard libraries added in 1.27. This
+is a convenience for embedders who have a slower version policy than Go.
+However, only supported Go versions may be used to raise support issues.

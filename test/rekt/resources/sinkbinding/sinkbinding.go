@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -125,4 +125,19 @@ func WithSink(d *duckv1.Destination) manifest.CfgFn {
 // IsReady tests to see if a PingSource becomes ready within the time given.
 func IsReady(name string, timing ...time.Duration) feature.StepFn {
 	return k8s.IsReady(Gvr(), name, timing...)
+}
+
+func AsDestinationRef(name string) *duckv1.Destination {
+	return &duckv1.Destination{
+		Ref: AsKReference(name),
+	}
+}
+
+// AsKReference returns a KReference for a Broker without namespace.
+func AsKReference(name string) *duckv1.KReference {
+	return &duckv1.KReference{
+		Kind:       "Broker",
+		Name:       name,
+		APIVersion: "eventing.knative.dev/v1",
+	}
 }

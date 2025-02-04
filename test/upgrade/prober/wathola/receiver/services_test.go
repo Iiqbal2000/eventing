@@ -4,7 +4,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ * 	http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -68,7 +68,7 @@ func TestMain(m *testing.M) {
 }
 
 func waitUntilFinished(r *receiver) error {
-	return wait.PollImmediate(5*time.Millisecond, 30*time.Second, func() (done bool, err error) {
+	return wait.PollUntilContextTimeout(context.Background(), 5*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (done bool, err error) {
 		state := r.finished.State()
 		return state != event.Active, nil
 	})

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@ package testing
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,7 +29,9 @@ import (
 	"knative.dev/pkg/ptr"
 
 	eventingv1 "knative.dev/eventing/pkg/apis/duck/v1"
+	apiseventing "knative.dev/eventing/pkg/apis/eventing"
 	v1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	"knative.dev/eventing/pkg/apis/feature"
 )
 
 // TriggerOption enables further configuration of a Trigger.
@@ -52,10 +55,35 @@ func NewTrigger(name, namespace, broker string, to ...TriggerOption) *v1.Trigger
 	return t
 }
 
+func NewTriggerWithBrokerRef(name, namespace string, to ...TriggerOption) *v1.Trigger {
+	t := &v1.Trigger{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+
+	for _, opt := range to {
+		opt(t)
+	}
+
+	t.SetDefaults(context.Background())
+	return t
+}
+
 func WithTriggerSubscriberURI(rawurl string) TriggerOption {
 	uri, _ := apis.ParseURL(rawurl)
 	return func(t *v1.Trigger) {
 		t.Spec.Subscriber = duckv1.Destination{URI: uri}
+	}
+}
+
+func WithBrokerLabels(brokerName, brokerNamespace string) TriggerOption {
+	return func(t *v1.Trigger) {
+		if t.Labels == nil {
+			t.Labels = make(map[string]string)
+		}
+		t.Labels[apiseventing.BrokerLabelKey] = brokerName
 	}
 }
 
@@ -161,6 +189,17 @@ func WithTriggerBrokerUnknown(reason, message string) TriggerOption {
 	}
 }
 
+func WithTriggerBrokerRef(gvk metav1.GroupVersionKind, name string, namespace string) TriggerOption {
+	return func(t *v1.Trigger) {
+		t.Spec.BrokerRef = &duckv1.KReference{
+			APIVersion: apiVersion(gvk),
+			Kind:       gvk.Kind,
+			Name:       name,
+			Namespace:  namespace,
+		}
+	}
+}
+
 func WithTriggerNotSubscribed(reason, message string) TriggerOption {
 	return func(t *v1.Trigger) {
 		t.Status.MarkNotSubscribed(reason, message)
@@ -258,6 +297,40 @@ func WithTriggerSubscriberResolvedSucceeded() TriggerOption {
 func WithTriggerSubscriberResolvedFailed(reason, message string) TriggerOption {
 	return func(t *v1.Trigger) {
 		t.Status.MarkSubscriberResolvedFailed(reason, message)
+	}
+}
+
+func WithTriggerOIDCIdentityCreatedSucceeded() TriggerOption {
+	return func(t *v1.Trigger) {
+		t.Status.MarkOIDCIdentityCreatedSucceeded()
+	}
+}
+
+func WithTriggerOIDCIdentityCreatedSucceededBecauseOIDCFeatureDisabled() TriggerOption {
+	return func(t *v1.Trigger) {
+		t.Status.MarkOIDCIdentityCreatedSucceededWithReason(fmt.Sprintf("%s feature disabled", feature.OIDCAuthentication), "")
+	}
+}
+
+func WithTriggerOIDCIdentityCreatedFailed(reason, message string) TriggerOption {
+	return func(t *v1.Trigger) {
+		t.Status.MarkOIDCIdentityCreatedFailed(reason, message)
+	}
+}
+
+func WithTriggerOIDCIdentityCreatedNotSupported() TriggerOption {
+	return func(t *v1.Trigger) {
+		t.Status.MarkOIDCIdentityCreatedNotSupported()
+	}
+}
+
+func WithTriggerOIDCServiceAccountName(name string) TriggerOption {
+	return func(t *v1.Trigger) {
+		if t.Status.Auth == nil {
+			t.Status.Auth = &duckv1.AuthStatus{}
+		}
+
+		t.Status.Auth.ServiceAccountName = &name
 	}
 }
 

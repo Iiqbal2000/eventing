@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -195,6 +195,11 @@ func (a *cronJobsRunner) newPingSourceClient(source *sourcesv1.PingSource) (adap
 			Namespace:      source.GetNamespace(),
 			Name:           a.clientConfig.Env.GetName(),
 			EnvSinkTimeout: fmt.Sprintf("%d", a.clientConfig.Env.GetSinktimeout()),
+			Audience:       source.Status.SinkAudience,
+		}
+
+		if source.Status.Auth != nil {
+			env.OIDCServiceAccountName = source.Status.Auth.ServiceAccountName
 		}
 	}
 
@@ -209,11 +214,13 @@ func (a *cronJobsRunner) newPingSourceClient(source *sourcesv1.PingSource) (adap
 	)
 
 	cfg := adapter.ClientConfig{
-		Env:                 &env,
-		CeOverrides:         source.Spec.CloudEventOverrides,
-		Reporter:            a.clientConfig.Reporter,
-		CrStatusEventClient: a.clientConfig.CrStatusEventClient,
-		Options:             a.clientConfig.Options,
+		Env:                        &env,
+		CeOverrides:                source.Spec.CloudEventOverrides,
+		Reporter:                   a.clientConfig.Reporter,
+		CrStatusEventClient:        a.clientConfig.CrStatusEventClient,
+		Options:                    a.clientConfig.Options,
+		TrustBundleConfigMapLister: a.clientConfig.TrustBundleConfigMapLister,
+		TokenProvider:              a.clientConfig.TokenProvider,
 	}
 
 	return adapter.NewClient(cfg)

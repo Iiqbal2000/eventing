@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -140,7 +140,7 @@ func TestUnsupportedEventSender(t *testing.T) {
 }
 
 func waitForPort(t *testing.T, port int) {
-	if err := wait.PollImmediate(time.Millisecond, 10*time.Second, func() (bool, error) {
+	if err := wait.PollUntilContextTimeout(context.Background(), time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
 		conn, conErr := net.Dial("tcp", fmt.Sprintf(":%d", port))
 		defer func() {
 			if conn != nil {

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,17 +33,22 @@ import (
 	"github.com/cloudevents/sdk-go/v2/test"
 	"github.com/pkg/errors"
 	"go.uber.org/zap"
+	"k8s.io/client-go/rest"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	"knative.dev/pkg/injection"
 
 	"knative.dev/pkg/tracing"
 	tracingconfig "knative.dev/pkg/tracing/config"
 
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/channel"
 	"knative.dev/eventing/pkg/channel/fanout"
 	"knative.dev/eventing/pkg/channel/multichannelfanout"
+	"knative.dev/eventing/pkg/eventingtls"
 	"knative.dev/eventing/pkg/kncloudevents"
 
+	fakekubeclient "knative.dev/pkg/client/injection/kube/client/fake"
 	logtesting "knative.dev/pkg/logging/testing"
 	_ "knative.dev/pkg/system/testing"
 )
@@ -104,7 +109,13 @@ func TestDispatcher_close(t *testing.T) {
 
 // This test emulates a real dispatcher usage
 func TestDispatcher_dispatch(t *testing.T) {
+	ctx := context.Background()
+	ctx, _ = fakekubeclient.With(ctx)
+	ctx = injection.WithConfig(ctx, &rest.Config{})
+
 	logger, err := zap.NewDevelopment(zap.AddStacktrace(zap.WarnLevel))
+	oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+	dispatcher := kncloudevents.NewDispatcher(eventingtls.NewDefaultClientConfig(), oidcTokenProvider)
 	reporter := channel.NewStatsReporter("testcontainer", "testpod")
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +241,7 @@ func TestDispatcher_dispatch(t *testing.T) {
 		},
 	}
 
-	sh, err := multichannelfanout.NewEventHandlerWithConfig(context.TODO(), logger, config, reporter)
+	sh, err := multichannelfanout.NewEventHandlerWithConfig(context.TODO(), logger, config, reporter, dispatcher)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,21 +256,22 @@ func TestDispatcher_dispatch(t *testing.T) {
 		Logger:       logger,
 	}
 
-	dispatcher := NewEventDispatcher(dispatcherArgs)
+	inMemoryDispatcher := NewEventDispatcher(dispatcherArgs)
 
 	serverCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Start the dispatcher
 	go func() {
-		if err := dispatcher.Start(serverCtx); err != nil {
+		if err := inMemoryDispatcher.Start(serverCtx); err != nil {
 			t.Error(err)
 		}
 	}()
-	dispatcher.WaitReady()
+	inMemoryDispatcher.WaitReady()
 
 	// Ok now everything should be ready to send the event
-	dispatchInfo, err := kncloudevents.SendEvent(context.TODO(), test.FullEvent(), *mustParseUrlToAddressable(t, channelAProxy.URL))
+	d := kncloudevents.NewDispatcher(eventingtls.NewDefaultClientConfig(), oidcTokenProvider)
+	dispatchInfo, err := d.SendEvent(context.TODO(), test.FullEvent(), *mustParseUrlToAddressable(t, channelAProxy.URL))
 	if err != nil {
 		t.Fatal(err)
 	}

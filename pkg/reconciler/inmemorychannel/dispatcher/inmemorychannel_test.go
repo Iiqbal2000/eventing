@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,13 @@ package dispatcher
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgotesting "k8s.io/client-go/testing"
@@ -40,9 +42,11 @@ import (
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	"knative.dev/eventing/pkg/apis/feature"
 	v1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/channel/fanout"
 	fakeeventingclient "knative.dev/eventing/pkg/client/injection/client/fake"
 	"knative.dev/eventing/pkg/client/injection/reconciler/messaging/v1/inmemorychannel"
+	"knative.dev/eventing/pkg/eventingtls"
 	"knative.dev/eventing/pkg/kncloudevents"
 	. "knative.dev/eventing/pkg/reconciler/testing/v1"
 
@@ -50,11 +54,11 @@ import (
 )
 
 const (
-	testNS                            = "test-namespace"
-	imcName                           = "test-imc"
-	twoSubscriberPatch                = `[{"op":"add","path":"/status/subscribers","value":[{"observedGeneration":1,"ready":"True","uid":"2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1"},{"observedGeneration":2,"ready":"True","uid":"34c5aec8-deb6-11e8-9f32-f2801f1b9fd1"}]}]`
-	oneSubscriberPatch                = `[{"op":"add","path":"/status/subscribers","value":[{"observedGeneration":1,"ready":"True","uid":"2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1"}]}]`
-	oneSubscriberRemovedOneAddedPatch = `[{"op":"add","path":"/status/subscribers/2","value":{"observedGeneration":2,"ready":"True","uid":"34c5aec8-deb6-11e8-9f32-f2801f1b9fd1"}},{"op":"remove","path":"/status/subscribers/0"}]`
+	testNS                = "test-namespace"
+	imcName               = "test-imc"
+	twoSubscriberPatch    = `[{"op":"add","path":"/status/subscribers","value":[{"observedGeneration":1,"ready":"True","uid":"2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1"},{"observedGeneration":2,"ready":"True","uid":"34c5aec8-deb6-11e8-9f32-f2801f1b9fd1"}]}]`
+	oneSubscriberPatch    = `[{"op":"add","path":"/status/subscribers","value":[{"observedGeneration":1,"ready":"True","uid":"2f9b5e8e-deb6-11e8-9f32-f2801f1b9fd1"}]}]`
+	oneSubscriberReplaced = `[{"op":"replace","path":"/status/subscribers/1/uid","value":"34c5aec8-deb6-11e8-9f32-f2801f1b9fd1"}]`
 )
 
 var (
@@ -191,7 +195,7 @@ func TestAllCases(t *testing.T) {
 					WithInMemoryChannelAddress(channelServiceAddress)),
 			},
 		}, {
-			Name: "with subscribers, one removed one added to status",
+			Name: "with subscribers, one replaced to status",
 			Key:  imcKey,
 			Objects: []runtime.Object{
 				NewInMemoryChannel(imcName, testNS,
@@ -201,12 +205,12 @@ func TestAllCases(t *testing.T) {
 					WithInMemoryChannelEndpointsReady(),
 					WithInMemoryChannelChannelServiceReady(),
 					WithInMemoryChannelSubscribers(subscribers),
-					WithInMemoryChannelReadySubscriberAndGeneration(string(subscriber3UID), subscriber3Generation),
 					WithInMemoryChannelReadySubscriberAndGeneration(string(subscriber1UID), subscriber1Generation),
+					WithInMemoryChannelReadySubscriberAndGeneration(string(subscriber3UID), subscriber3Generation),
 					WithInMemoryChannelAddress(channelServiceAddress)),
 			},
 			WantPatches: []clientgotesting.PatchActionImpl{
-				makePatch(testNS, imcName, oneSubscriberRemovedOneAddedPatch),
+				makePatch(testNS, imcName, oneSubscriberReplaced),
 			},
 		}, {
 			Name: "subscriber with delivery spec",
@@ -266,7 +270,8 @@ func TestAllCases(t *testing.T) {
 						},
 					}),
 					WithInMemoryChannelAddress(channelServiceAddress),
-					WithInMemoryChannelDLSUnknown()),
+					WithInMemoryChannelDLSUnknown(),
+					WithInMemoryChannelEventPoliciesReady()),
 			},
 			WantEvents: []string{
 				Eventf(corev1.EventTypeWarning, "InternalError", "failed to parse Spec.BackoffDelay: expected 'P' period mark at the start: garbage"),
@@ -344,7 +349,8 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				WithInMemoryChannelChannelServiceReady(),
 				WithInMemoryChannelSubscribers(subscribers),
 				WithInMemoryChannelAddress(channelServiceAddress),
-				WithInMemoryChannelDLSUnknown()),
+				WithInMemoryChannelDLSUnknown(),
+				WithInMemoryChannelEventPoliciesReady()),
 			wantSubs: []fanout.Subscription{{
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call1"),
@@ -352,13 +358,16 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				Reply: &duckv1.Addressable{
 					URL: apis.HTTP("sink2"),
 				},
+				Namespace: testNS,
 			}, {
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call2"),
 				},
 				Reply: &duckv1.Addressable{
 					URL: apis.HTTP("sink2"),
-				}},
+				},
+				Namespace: testNS,
+			},
 			},
 		},
 		"with one subscriber, one added": {
@@ -370,15 +379,18 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				WithInMemoryChannelChannelServiceReady(),
 				WithInMemoryChannelSubscribers(subscribers),
 				WithInMemoryChannelAddress(channelServiceAddress),
-				WithInMemoryChannelDLSUnknown()),
+				WithInMemoryChannelDLSUnknown(),
+				WithInMemoryChannelEventPoliciesReady()),
 			subs: []fanout.Subscription{*subscription1},
 			wantSubs: []fanout.Subscription{{
+				Namespace: testNS,
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call1"),
 				},
 				Reply: &duckv1.Addressable{
 					URL: apis.HTTP("sink2"),
 				}}, {
+				Namespace: testNS,
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call2"),
 				},
@@ -396,15 +408,18 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				WithInMemoryChannelChannelServiceReady(),
 				WithInMemoryChannelSubscribers(subscribers),
 				WithInMemoryChannelAddress(channelServiceAddress),
-				WithInMemoryChannelDLSUnknown()),
+				WithInMemoryChannelDLSUnknown(),
+				WithInMemoryChannelEventPoliciesReady()),
 			subs: []fanout.Subscription{*subscription1, *subscription2},
 			wantSubs: []fanout.Subscription{{
+				Namespace: testNS,
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call1"),
 				},
 				Reply: &duckv1.Addressable{
 					URL: apis.HTTP("sink2"),
 				}}, {
+				Namespace: testNS,
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call2"),
 				},
@@ -422,10 +437,12 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				WithInMemoryChannelChannelServiceReady(),
 				WithInMemoryChannelSubscribers([]eventingduckv1.SubscriberSpec{subscriber1}),
 				WithInMemoryChannelAddress(channelServiceAddress),
-				WithInMemoryChannelDLSUnknown()),
+				WithInMemoryChannelDLSUnknown(),
+				WithInMemoryChannelEventPoliciesReady()),
 			subs: []fanout.Subscription{*subscription1, *subscription2},
 			wantSubs: []fanout.Subscription{
 				{
+					Namespace: testNS,
 					Subscriber: duckv1.Addressable{
 						URL: apis.HTTP("call1"),
 					},
@@ -443,16 +460,19 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				WithInMemoryChannelChannelServiceReady(),
 				WithInMemoryChannelSubscribers([]eventingduckv1.SubscriberSpec{subscriber1, subscriber3}),
 				WithInMemoryChannelAddress(channelServiceAddress),
-				WithInMemoryChannelDLSUnknown()),
+				WithInMemoryChannelDLSUnknown(),
+				WithInMemoryChannelEventPoliciesReady()),
 			subs: []fanout.Subscription{*subscription1, *subscription2},
 			wantSubs: []fanout.Subscription{
 				{
+					Namespace: testNS,
 					Subscriber: duckv1.Addressable{
 						URL: apis.HTTP("call1"),
 					},
 					Reply: &duckv1.Addressable{
 						URL: apis.HTTP("sink2"),
 					}}, {
+					Namespace: testNS,
 					Subscriber: duckv1.Addressable{
 						URL: apis.HTTP("call3"),
 					},
@@ -470,7 +490,8 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				WithInMemoryChannelChannelServiceReady(),
 				WithInMemoryChannelSubscribers([]eventingduckv1.SubscriberSpec{subscriber1WithLinearRetry}),
 				WithInMemoryChannelAddress(channelServiceAddress),
-				WithInMemoryChannelDLSUnknown()),
+				WithInMemoryChannelDLSUnknown(),
+				WithInMemoryChannelEventPoliciesReady()),
 			subs: []fanout.Subscription{{
 				Subscriber: duckv1.Addressable{
 					URL: apis.HTTP("call1"),
@@ -480,9 +501,11 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				},
 				RetryConfig: &kncloudevents.RetryConfig{RetryMax: 2, BackoffPolicy: &exponential}}},
 			wantSubs: []fanout.Subscription{
-				{Subscriber: duckv1.Addressable{
-					URL: apis.HTTP("call1"),
-				},
+				{
+					Namespace: testNS,
+					Subscriber: duckv1.Addressable{
+						URL: apis.HTTP("call1"),
+					},
 					Reply: &duckv1.Addressable{
 						URL: apis.HTTP("sink2"),
 					},
@@ -491,13 +514,17 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 		},
 	}
 	for n, tc := range testCases {
-		ctx, fakeEventingClient := fakeeventingclient.With(context.Background(), tc.imc)
+		ctx, _ := SetupFakeContext(t, SetUpInformerSelector)
+		ctx, fakeEventingClient := fakeeventingclient.With(ctx, tc.imc)
 		feature.ToContext(ctx, feature.Flags{
 			feature.EvenTypeAutoCreate: feature.Disabled,
 		})
+
+		oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+		dispatcher := kncloudevents.NewDispatcher(eventingtls.ClientConfig{}, oidcTokenProvider)
 		// Just run the tests once with no existing handler (creates the handler) and once
 		// with an existing, so we exercise both paths at once.
-		fh, err := fanout.NewFanoutEventHandler(nil, fanout.Config{}, nil, nil, nil, nil)
+		fh, err := fanout.NewFanoutEventHandler(nil, fanout.Config{}, nil, nil, nil, nil, dispatcher)
 		if err != nil {
 			t.Error(err)
 		}
@@ -519,9 +546,9 @@ func TestReconciler_ReconcileKind(t *testing.T) {
 				}
 				channelHandler := handler.GetChannelHandler(channelServiceAddress.URL.Host)
 				if channelHandler == nil {
-					t.Errorf("Did not get handler for %s", channelServiceAddress.URL.Host)
+					t.Fatalf("Did not get handler for %s", channelServiceAddress.URL.Host)
 				}
-				if diff := cmp.Diff(tc.wantSubs, channelHandler.GetSubscriptions(context.TODO()), cmpopts.IgnoreFields(kncloudevents.RetryConfig{}, "Backoff", "CheckRetry")); diff != "" {
+				if diff := cmp.Diff(tc.wantSubs, channelHandler.GetSubscriptions(context.TODO()), cmpopts.IgnoreFields(kncloudevents.RetryConfig{}, "Backoff", "CheckRetry"), cmpopts.IgnoreFields(fanout.Subscription{}, "UID")); diff != "" {
 					t.Error("unexpected subs (+want/-got)", diff)
 				}
 			})
@@ -542,7 +569,11 @@ func TestReconciler_InvalidInputs(t *testing.T) {
 		},
 	}
 	for n, tc := range testCases {
-		fh, err := fanout.NewFanoutEventHandler(nil, fanout.Config{}, nil, nil, nil, nil)
+		ctx, _ := SetupFakeContext(t, SetUpInformerSelector)
+
+		oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+		dispatcher := kncloudevents.NewDispatcher(eventingtls.ClientConfig{}, oidcTokenProvider)
+		fh, err := fanout.NewFanoutEventHandler(nil, fanout.Config{}, nil, nil, nil, nil, dispatcher)
 		if err != nil {
 			t.Error(err)
 		}
@@ -572,7 +603,11 @@ func TestReconciler_Deletion(t *testing.T) {
 		},
 	}
 	for n, tc := range testCases {
-		fh, err := fanout.NewFanoutEventHandler(nil, fanout.Config{}, nil, nil, nil, nil)
+		ctx, _ := SetupFakeContext(t, SetUpInformerSelector)
+
+		oidcTokenProvider := auth.NewOIDCTokenProvider(ctx)
+		dispatcher := kncloudevents.NewDispatcher(eventingtls.ClientConfig{}, oidcTokenProvider)
+		fh, err := fanout.NewFanoutEventHandler(nil, fanout.Config{}, nil, nil, nil, nil, dispatcher)
 		if err != nil {
 			t.Error(err)
 		}
@@ -628,4 +663,107 @@ func (f *fakeMultiChannelHandler) GetChannelHandler(host string) fanout.EventHan
 
 func (f *fakeMultiChannelHandler) CountChannelHandlers() int {
 	return len(f.handlers)
+}
+
+func Test_newConfigForInMemoryChannelAsyncHandler(t *testing.T) {
+	ctx, _ := SetupFakeContext(t, SetUpInformerSelector)
+
+	type args struct {
+		ctx context.Context
+		imc *v1.InMemoryChannel
+	}
+	tests := []struct {
+		name      string
+		args      args
+		wantAsync bool
+		wantErr   bool
+	}{
+		{
+			name: "async handler",
+			args: args{
+				ctx: ctx,
+				imc: &v1.InMemoryChannel{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "n",
+						Namespace: "ns",
+						Annotations: map[string]string{
+							v1.AsyncHandlerAnnotation: "true",
+						},
+					},
+					Status: v1.InMemoryChannelStatus{
+						ChannelableStatus: eventingduckv1.ChannelableStatus{
+							AddressStatus: duckv1.AddressStatus{
+								Address: &duckv1.Addressable{
+									URL: apis.HTTPS("something"),
+								},
+							},
+						},
+					},
+				},
+			},
+			wantAsync: true,
+			wantErr:   false,
+		},
+		{
+			name: "sync handler, default",
+			args: args{
+				ctx: ctx,
+				imc: &v1.InMemoryChannel{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "n",
+						Namespace: "ns",
+					},
+					Status: v1.InMemoryChannelStatus{
+						ChannelableStatus: eventingduckv1.ChannelableStatus{
+							AddressStatus: duckv1.AddressStatus{
+								Address: &duckv1.Addressable{
+									URL: apis.HTTPS("something"),
+								},
+							},
+						},
+					},
+				},
+			},
+			wantAsync: false,
+			wantErr:   false,
+		},
+		{
+			name: "sync handler, explicit",
+			args: args{
+				ctx: ctx,
+				imc: &v1.InMemoryChannel{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "n",
+						Namespace: "ns",
+						Annotations: map[string]string{
+							v1.AsyncHandlerAnnotation: "false",
+						},
+					},
+					Status: v1.InMemoryChannelStatus{
+						ChannelableStatus: eventingduckv1.ChannelableStatus{
+							AddressStatus: duckv1.AddressStatus{
+								Address: &duckv1.Addressable{
+									URL: apis.HTTPS("something"),
+								},
+							},
+						},
+					},
+				},
+			},
+			wantAsync: false,
+			wantErr:   false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newConfigForInMemoryChannel(tt.args.ctx, tt.args.imc)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("newConfigForInMemoryChannel() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !reflect.DeepEqual(got.FanoutConfig.AsyncHandler, tt.wantAsync) {
+				t.Errorf("newConfigForInMemoryChannel() got = %v, want %v", got, tt.wantAsync)
+			}
+		})
+	}
 }

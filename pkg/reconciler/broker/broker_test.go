@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,6 +33,7 @@ import (
 	clientgotesting "k8s.io/client-go/testing"
 	"knative.dev/pkg/apis"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
+	v1addr "knative.dev/pkg/client/injection/ducks/duck/v1/addressable"
 	v1a1addr "knative.dev/pkg/client/injection/ducks/duck/v1alpha1/addressable"
 	v1b1addr "knative.dev/pkg/client/injection/ducks/duck/v1beta1/addressable"
 	"knative.dev/pkg/configmap"
@@ -40,10 +41,15 @@ import (
 	fakedynamicclient "knative.dev/pkg/injection/clients/dynamicclient/fake"
 	logtesting "knative.dev/pkg/logging/testing"
 	"knative.dev/pkg/network"
+	"knative.dev/pkg/resolver"
 	"knative.dev/pkg/tracker"
 
 	"knative.dev/eventing/pkg/apis/eventing"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	eventingv1alpha1 "knative.dev/eventing/pkg/apis/eventing/v1alpha1"
 	"knative.dev/eventing/pkg/apis/feature"
+	v1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/auth"
 	fakeeventingclient "knative.dev/eventing/pkg/client/injection/client/fake"
 	"knative.dev/eventing/pkg/client/injection/ducks/duck/v1/channelable"
 	"knative.dev/eventing/pkg/client/injection/reconciler/eventing/v1/broker"
@@ -53,6 +59,7 @@ import (
 	. "knative.dev/pkg/reconciler/testing"
 
 	_ "knative.dev/eventing/pkg/client/injection/informers/eventing/v1/trigger/fake"
+	"knative.dev/eventing/pkg/reconciler/broker/resources"
 	. "knative.dev/eventing/pkg/reconciler/testing/v1"
 )
 
@@ -75,6 +82,8 @@ const (
 apiVersion: "messaging.knative.dev/v1"
 kind: "InMemoryChannel"
 `
+	readyEventPolicyName   = "test-event-policy-ready"
+	unreadyEventPolicyName = "test-event-policy-unready"
 )
 
 var (
@@ -91,6 +100,11 @@ var (
 		Host:   network.GetServiceHostname(ingressServiceName, systemNS),
 		Path:   fmt.Sprintf("/%s/%s", testNS, brokerName),
 	}
+
+	brokerAudience = auth.GetAudience(eventingv1.SchemeGroupVersion.WithKind("Broker"), metav1.ObjectMeta{
+		Name:      brokerName,
+		Namespace: testNS,
+	})
 
 	brokerDestv1 = duckv1.Destination{
 		Ref: &duckv1.KReference{
@@ -126,6 +140,18 @@ var (
 
 	dls = duckv1.Addressable{
 		URL: apis.HTTP("test-dls.test-namespace.svc.cluster.local"),
+	}
+
+	brokerV1GVK = metav1.GroupVersionKind{
+		Group:   "eventing.knative.dev",
+		Version: "v1",
+		Kind:    "Broker",
+	}
+
+	channelV1GVK = metav1.GroupVersionKind{
+		Group:   "messaging.knative.dev",
+		Version: "v1",
+		Kind:    "InMemoryChannel",
 	}
 )
 
@@ -377,8 +403,51 @@ func TestReconcile(t *testing.T) {
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
 					WithChannelNameAnnotation(triggerChannelName),
-					WithDLSNotConfigured()),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
+		}, {
+			Name: "Propagate annotations",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				makeDLSServiceAsUnstructured(),
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithInitBrokerConditions,
+					WithBrokerAnnotation(v1.AsyncHandlerAnnotation, "true")),
+				createChannel(withChannelReady),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerAnnotation(v1.AsyncHandlerAnnotation, "true"),
+					WithBrokerReady,
+					WithDLSNotConfigured(),
+					WithBrokerAddressURI(brokerAddress),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
+			}},
+			WantPatches: []clientgotesting.PatchActionImpl{
+				{
+					ActionImpl: clientgotesting.ActionImpl{
+						Namespace: testNS,
+					},
+					Name:  fmt.Sprintf("%s-kne-trigger", brokerName),
+					Patch: []byte(`[{"op":"add","path":"/metadata/annotations/messaging.knative.dev~1async-handler","value":"` + "true" + `"}]`),
+				},
+			},
 		}, {
 			Name: "Successful Reconciliation with a Channel with CA certs",
 			Key:  testKey,
@@ -407,7 +476,39 @@ func TestReconcile(t *testing.T) {
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
 					WithChannelNameAnnotation(triggerChannelName),
-					WithDLSNotConfigured()),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
+			}},
+		}, {
+			Name: "Successful Reconciliation with a Channel with Audience",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady, withChannelStatusAudience(channelAudience)),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReady,
+					WithBrokerAddressURI(brokerAddress),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAudienceAnnotation(channelAudience),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
 		}, {
 			Name: "Successful Reconciliation. Using legacy channel template config element.",
@@ -436,7 +537,8 @@ func TestReconcile(t *testing.T) {
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
 					WithChannelNameAnnotation(triggerChannelName),
-					WithDLSNotConfigured()),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
 		}, {
 			Name: "Successful Reconciliation, status update fails",
@@ -468,7 +570,8 @@ func TestReconcile(t *testing.T) {
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
 					WithChannelNameAnnotation(triggerChannelName),
-					WithDLSNotConfigured()),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
 			WantEvents: []string{
 				Eventf(corev1.EventTypeWarning, "UpdateFailed", `Failed to update status for "test-broker": inducing failure for update brokers`),
@@ -530,7 +633,8 @@ func TestReconcile(t *testing.T) {
 					WithChannelAddressAnnotation(triggerChannelURL),
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
-					WithChannelNameAnnotation(triggerChannelName)),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
 			WantErr: false,
 		}, {
@@ -563,7 +667,8 @@ func TestReconcile(t *testing.T) {
 					WithChannelAddressAnnotation(triggerChannelURL),
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
-					WithChannelNameAnnotation(triggerChannelName)),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
 			WantPatches: []clientgotesting.PatchActionImpl{
 				makeChannelDLSRefNamePatch(sinkSVCDest.Ref.Name),
@@ -597,7 +702,8 @@ func TestReconcile(t *testing.T) {
 					WithChannelAddressAnnotation(triggerChannelURL),
 					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
 					WithChannelKindAnnotation(triggerChannelKind),
-					WithChannelNameAnnotation(triggerChannelName)),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled()),
 			}},
 			WantPatches: []clientgotesting.PatchActionImpl{
 				makeChannelDeliveryRetryPatch(deliveryRetries),
@@ -646,6 +752,7 @@ func TestReconcile(t *testing.T) {
 							URL:  brokerAddress,
 						},
 					}),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled(),
 				),
 			}},
 			Ctx: feature.ToContext(context.Background(), feature.Flags{
@@ -697,10 +804,283 @@ func TestReconcile(t *testing.T) {
 						URL:     httpsURL(brokerName, testNS),
 						CACerts: pointer.String(testCaCerts),
 					}),
+					WithBrokerEventPoliciesReadyBecauseOIDCDisabled(),
 				),
 			}},
 			Ctx: feature.ToContext(context.Background(), feature.Flags{
 				feature.TransportEncryption: feature.Strict,
+			}),
+		},
+		{
+			Name: "Should provision audience if authentication enabled",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				makeDLSServiceAsUnstructured(),
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithDeadLeaderSink(sinkSVCDest),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady, withChannelDeadLetterSink(sinkSVCDest)),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				makeEventPolicy(),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReadyWithDLS,
+					WithDeadLeaderSink(sinkSVCDest),
+					WithBrokerAddress(&duckv1.Addressable{
+						URL:      brokerAddress,
+						Audience: &brokerAudience,
+					}),
+					WithBrokerStatusDLS(dls),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithBrokerEventPoliciesReadyBecauseNoPolicyAndOIDCEnabled(),
+				),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
+			}),
+		},
+		{
+			Name: "Should respect setting default authorization mode",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				makeDLSServiceAsUnstructured(),
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithDeadLeaderSink(sinkSVCDest),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady, withChannelDeadLetterSink(sinkSVCDest)),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+			},
+			WantErr: false,
+			WantCreates: []runtime.Object{
+				makeEventPolicy(),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReadyWithDLS,
+					WithDeadLeaderSink(sinkSVCDest),
+					WithBrokerAddress(&duckv1.Addressable{
+						URL:      brokerAddress,
+						Audience: &brokerAudience,
+					}),
+					WithBrokerStatusDLS(dls),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithBrokerEventPoliciesReadyAndDefaultAuthorizationMode(string(feature.AuthorizationDenyAll)),
+				),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationDenyAll,
+			}),
+		},
+		{
+			Name: "Should list applying EventPolicies",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(brokerV1GVK, brokerName),
+				),
+			},
+			WantCreates: []runtime.Object{
+				makeEventPolicy(),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReady,
+					WithBrokerAddress(&duckv1.Addressable{
+						URL:      brokerAddress,
+						Audience: &brokerAudience,
+					}),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReady(),
+					WithBrokerEventPoliciesListed(readyEventPolicyName)),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication: feature.Enabled,
+			}),
+		},
+		{
+			Name: "Should mark as NotReady on unready EventPolicies",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEventPolicy(unreadyEventPolicyName, testNS,
+					WithUnreadyEventPolicyCondition("", ""),
+					WithEventPolicyToRef(brokerV1GVK, brokerName),
+				),
+			},
+			WantCreates: []runtime.Object{
+				makeEventPolicy(),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReady,
+					WithBrokerAddress(&duckv1.Addressable{
+						URL:      brokerAddress,
+						Audience: &brokerAudience,
+					}),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesNotReady("EventPoliciesNotReady", fmt.Sprintf("event policies %s are not ready", unreadyEventPolicyName))),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication: feature.Enabled,
+			}),
+		},
+		{
+			Name: "Should list only Ready EventPolicies",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEventPolicy(readyEventPolicyName, testNS,
+					WithReadyEventPolicyCondition,
+					WithEventPolicyToRef(brokerV1GVK, brokerName),
+				),
+				NewEventPolicy(unreadyEventPolicyName, testNS,
+					WithUnreadyEventPolicyCondition("", ""),
+					WithEventPolicyToRef(brokerV1GVK, brokerName),
+				),
+			},
+			WantCreates: []runtime.Object{
+				makeEventPolicy(),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReady,
+					WithBrokerAddress(&duckv1.Addressable{
+						URL:      brokerAddress,
+						Audience: &brokerAudience,
+					}),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesNotReady("EventPoliciesNotReady", fmt.Sprintf("event policies %s are not ready", unreadyEventPolicyName)),
+					WithBrokerEventPoliciesListed(readyEventPolicyName),
+				),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication: feature.Enabled,
+			}),
+		}, {
+			Name: "Should create an Event Policy for a Broker's underlying Channel",
+			Key:  testKey,
+			Objects: []runtime.Object{
+				NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithInitBrokerConditions),
+				createChannel(withChannelReady),
+				imcConfigMap(),
+				NewEndpoints(filterServiceName, systemNS,
+					WithEndpointsLabels(FilterLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+				NewEndpoints(ingressServiceName, systemNS,
+					WithEndpointsLabels(IngressLabels()),
+					WithEndpointsAddresses(corev1.EndpointAddress{IP: "127.0.0.1"})),
+			},
+			WantCreates: []runtime.Object{
+				makeEventPolicy(),
+			},
+			WantStatusUpdates: []clientgotesting.UpdateActionImpl{{
+				Object: NewBroker(brokerName, testNS,
+					WithBrokerClass(eventing.MTChannelBrokerClassValue),
+					WithBrokerConfig(config()),
+					WithBrokerReady,
+					WithBrokerAddress(&duckv1.Addressable{
+						URL:      brokerAddress,
+						Audience: &brokerAudience,
+					}),
+					WithChannelAddressAnnotation(triggerChannelURL),
+					WithChannelAPIVersionAnnotation(triggerChannelAPIVersion),
+					WithChannelKindAnnotation(triggerChannelKind),
+					WithChannelNameAnnotation(triggerChannelName),
+					WithDLSNotConfigured(),
+					WithBrokerEventPoliciesReadyBecauseNoPolicyAndOIDCEnabled(),
+				),
+			}},
+			Ctx: feature.ToContext(context.Background(), feature.Flags{
+				feature.OIDCAuthentication:       feature.Enabled,
+				feature.AuthorizationDefaultMode: feature.AuthorizationAllowSameNamespace,
 			}),
 		},
 	}
@@ -710,6 +1090,7 @@ func TestReconcile(t *testing.T) {
 		ctx = channelable.WithDuck(ctx)
 		ctx = v1a1addr.WithDuck(ctx)
 		ctx = v1b1addr.WithDuck(ctx)
+		ctx = v1addr.WithDuck(ctx)
 
 		cm, err := listers.GetConfigMapLister().ConfigMaps(testNS).Get("config-features")
 		if err == nil {
@@ -728,6 +1109,8 @@ func TestReconcile(t *testing.T) {
 			configmapLister:    listers.GetConfigMapLister(),
 			secretLister:       listers.GetSecretLister(),
 			channelableTracker: duck.NewListableTrackerFromTracker(ctx, channelable.Get, tracker.New(func(types.NamespacedName) {}, 0)),
+			uriResolver:        resolver.NewURIResolverFromTracker(ctx, tracker.New(func(types.NamespacedName) {}, 0)),
+			eventPolicyLister:  listers.GetEventPolicyLister(),
 		}
 		return broker.NewReconciler(ctx, logger,
 			fakeeventingclient.Get(ctx), listers.GetBrokerLister(),
@@ -810,6 +1193,15 @@ func withChannelStatusCACerts(caCerts string) unstructuredOption {
 	return func(channel *unstructured.Unstructured) {
 		if err := unstructured.SetNestedField(channel.Object, caCerts,
 			"status", "address", "caCerts"); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func withChannelStatusAudience(aud string) unstructuredOption {
+	return func(channel *unstructured.Unstructured) {
+		if err := unstructured.SetNestedField(channel.Object, aud,
+			"status", "address", "audience"); err != nil {
 			panic(err)
 		}
 	}
@@ -970,6 +1362,7 @@ s/wImGnMVk5RzpBVrq2VB9SkX/ThTVYEC/Sd9BQM364MCR+TA1l8/ptaLFLuwyw8
 O2dgzikq8iSy1BlRsVw=
 -----END CERTIFICATE-----
 `
+	channelAudience = "channel-audience"
 )
 
 func makeTLSSecret() *corev1.Secret {
@@ -983,4 +1376,24 @@ func makeTLSSecret() *corev1.Secret {
 		},
 		Type: corev1.SecretTypeTLS,
 	}
+}
+
+func makeEventPolicy() *eventingv1alpha1.EventPolicy {
+	return NewEventPolicy(resources.BrokerEventPolicyName(brokerName, triggerChannelName), testNS,
+		WithEventPolicyToRef(channelV1GVK, triggerChannelName),
+		WithEventPolicyFromSub(resources.OIDCBrokerSub),
+		WithEventPolicyOwnerReferences([]metav1.OwnerReference{
+			{
+				APIVersion: "eventing.knative.dev/v1",
+				Kind:       "Broker",
+				Name:       brokerName,
+			},
+		}...),
+		WithEventPolicyLabels(map[string]string{
+			"eventing.knative.dev/" + "broker-group":   brokerV1GVK.Group,
+			"eventing.knative.dev/" + "broker-version": brokerV1GVK.Version,
+			"eventing.knative.dev/" + "broker-kind":    brokerV1GVK.Kind,
+			"eventing.knative.dev/" + "broker-name":    brokerName,
+		}),
+	)
 }

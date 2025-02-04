@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,14 +19,16 @@ package dispatcher
 import (
 	"context"
 	"fmt"
+	"strconv"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
+	listers "knative.dev/eventing/pkg/client/listers/messaging/v1"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"go.uber.org/zap"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	"knative.dev/pkg/apis/duck"
 	duckv1 "knative.dev/pkg/apis/duck/v1"
@@ -37,13 +39,15 @@ import (
 	eventingduckv1 "knative.dev/eventing/pkg/apis/duck/v1"
 	"knative.dev/eventing/pkg/apis/feature"
 	v1 "knative.dev/eventing/pkg/apis/messaging/v1"
+	"knative.dev/eventing/pkg/auth"
 	"knative.dev/eventing/pkg/channel"
 	"knative.dev/eventing/pkg/channel/fanout"
 	"knative.dev/eventing/pkg/channel/multichannelfanout"
-	eventingv1beta2 "knative.dev/eventing/pkg/client/clientset/versioned/typed/eventing/v1beta2"
+	eventingv1beta3 "knative.dev/eventing/pkg/client/clientset/versioned/typed/eventing/v1beta3"
 	messagingv1 "knative.dev/eventing/pkg/client/clientset/versioned/typed/messaging/v1"
 	reconcilerv1 "knative.dev/eventing/pkg/client/injection/reconciler/messaging/v1/inmemorychannel"
-	"knative.dev/eventing/pkg/client/listers/eventing/v1beta2"
+	"knative.dev/eventing/pkg/client/listers/eventing/v1beta3"
+	"knative.dev/eventing/pkg/eventingtls"
 	"knative.dev/eventing/pkg/eventtype"
 	"knative.dev/eventing/pkg/kncloudevents"
 )
@@ -53,9 +57,14 @@ type Reconciler struct {
 	multiChannelEventHandler multichannelfanout.MultiChannelEventHandler
 	reporter                 channel.StatsReporter
 	messagingClientSet       messagingv1.MessagingV1Interface
-	eventTypeLister          v1beta2.EventTypeLister
-	eventingClient           eventingv1beta2.EventingV1beta2Interface
+	eventTypeLister          v1beta3.EventTypeLister
+	inMemoryChannelLister    listers.InMemoryChannelLister
+	eventingClient           eventingv1beta3.EventingV1beta3Interface
 	featureStore             *feature.Store
+	eventDispatcher          *kncloudevents.Dispatcher
+
+	authVerifier *auth.Verifier
+	clientConfig eventingtls.ClientConfig
 }
 
 // Check the interfaces Reconciler should implement
@@ -87,23 +96,31 @@ func (r *Reconciler) reconcile(ctx context.Context, imc *v1.InMemoryChannel) rec
 		return nil
 	}
 
-	config, err := newConfigForInMemoryChannel(imc)
+	config, err := newConfigForInMemoryChannel(ctx, imc)
 	if err != nil {
 		logging.FromContext(ctx).Error("Error creating config for in memory channels", zap.Error(err))
 		return err
 	}
 	var eventTypeAutoHandler *eventtype.EventTypeAutoHandler
-	var channelReference *duckv1.KReference
+	var channelRef *duckv1.KReference
 	var UID *types.UID
-	if r.featureStore.IsEnabled(feature.EvenTypeAutoCreate) {
+	if ownerReferences := imc.GetOwnerReferences(); r.featureStore.IsEnabled(feature.EvenTypeAutoCreate) &&
+		(len(ownerReferences) == 0 ||
+			ownerReferences[0].Kind != "Broker") {
+		logging.FromContext(ctx).Info("EventType autocreate is enabled, creating handler")
 		eventTypeAutoHandler = &eventtype.EventTypeAutoHandler{
 			EventTypeLister: r.eventTypeLister,
 			EventingClient:  r.eventingClient,
 			FeatureStore:    r.featureStore,
 			Logger:          logging.FromContext(ctx).Desugar(),
 		}
-		channelReference = toKReference(imc)
+
+		channelRef = toKReference(imc)
 		UID = &imc.UID
+	}
+
+	wc := func(ctx context.Context) context.Context {
+		return r.featureStore.ToContext(ctx)
 	}
 
 	// First grab the host based MultiChannelFanoutMessage httpHandler
@@ -115,8 +132,12 @@ func (r *Reconciler) reconcile(ctx context.Context, imc *v1.InMemoryChannel) rec
 			config.FanoutConfig,
 			r.reporter,
 			eventTypeAutoHandler,
-			channelReference,
+			channelRef,
 			UID,
+			r.eventDispatcher,
+			channel.OIDCTokenVerification(r.authVerifier, audience(imc)),
+			channel.ReceiverWithContextFunc(wc),
+			channel.ReceiverWithGetPoliciesForFunc(r.getAppliedEventPolicyRef),
 		)
 		if err != nil {
 			logging.FromContext(ctx).Error("Failed to create a new fanout.EventHandler", err)
@@ -143,9 +164,13 @@ func (r *Reconciler) reconcile(ctx context.Context, imc *v1.InMemoryChannel) rec
 			config.FanoutConfig,
 			r.reporter,
 			eventTypeAutoHandler,
-			channelReference,
+			channelRef,
 			UID,
+			r.eventDispatcher,
 			channel.ResolveChannelFromPath(channel.ParseChannelFromPath),
+			channel.OIDCTokenVerification(r.authVerifier, audience(imc)),
+			channel.ReceiverWithContextFunc(wc),
+			channel.ReceiverWithGetPoliciesForFunc(r.getAppliedEventPolicyRef),
 		)
 		if err != nil {
 			logging.FromContext(ctx).Error("Failed to create a new fanout.EventHandler", err)
@@ -163,7 +188,9 @@ func (r *Reconciler) reconcile(ctx context.Context, imc *v1.InMemoryChannel) rec
 		}
 	}
 
-	handleSubscribers(imc.Spec.Subscribers, kncloudevents.AddOrUpdateAddressableHandler)
+	handleSubscribers(imc.Spec.Subscribers, func(addressable duckv1.Addressable) {
+		kncloudevents.AddOrUpdateAddressableHandler(r.clientConfig, addressable)
+	})
 
 	return nil
 }
@@ -202,7 +229,9 @@ func (r *Reconciler) patchSubscriberStatus(ctx context.Context, imc *v1.InMemory
 }
 
 // newConfigForInMemoryChannel creates a new Config for a single inmemory channel.
-func newConfigForInMemoryChannel(imc *v1.InMemoryChannel) (*multichannelfanout.ChannelConfig, error) {
+func newConfigForInMemoryChannel(ctx context.Context, imc *v1.InMemoryChannel) (*multichannelfanout.ChannelConfig, error) {
+	featureFlags := feature.FromContext(ctx)
+	isOIDCEnabled := featureFlags.IsOIDCAuthentication()
 	subs := make([]fanout.Subscription, len(imc.Spec.Subscribers))
 
 	for i, sub := range imc.Spec.Subscribers {
@@ -210,7 +239,24 @@ func newConfigForInMemoryChannel(imc *v1.InMemoryChannel) (*multichannelfanout.C
 		if err != nil {
 			return nil, err
 		}
+
+		conf.Namespace = imc.Namespace
+		if isOIDCEnabled {
+			conf.ServiceAccount = &types.NamespacedName{
+				Name:      *sub.Auth.ServiceAccountName,
+				Namespace: imc.Namespace,
+			}
+		}
+
 		subs[i] = *conf
+	}
+
+	async := false
+	if v, ok := imc.Annotations[v1.AsyncHandlerAnnotation]; ok {
+		b, err := strconv.ParseBool(v)
+		if err == nil {
+			async = b
+		}
 	}
 
 	return &multichannelfanout.ChannelConfig{
@@ -219,7 +265,7 @@ func newConfigForInMemoryChannel(imc *v1.InMemoryChannel) (*multichannelfanout.C
 		HostName:  imc.Status.Address.URL.Host,
 		Path:      fmt.Sprintf("%s/%s", imc.Namespace, imc.Name),
 		FanoutConfig: fanout.Config{
-			AsyncHandler:  true,
+			AsyncHandler:  async,
 			Subscriptions: subs,
 		},
 	}, nil
@@ -244,6 +290,15 @@ func (r *Reconciler) deleteFunc(obj interface{}) {
 	}
 
 	handleSubscribers(imc.Spec.Subscribers, kncloudevents.DeleteAddressableHandler)
+}
+
+func (r *Reconciler) getAppliedEventPolicyRef(channel channel.ChannelReference) ([]eventingduckv1.AppliedEventPolicyRef, error) {
+	imc, err := r.inMemoryChannelLister.InMemoryChannels(channel.Namespace).Get(channel.Name)
+	if err != nil {
+		return nil, fmt.Errorf("could not get inmemory channel %s/%s: %w", channel.Namespace, channel.Name, err)
+	}
+
+	return imc.Status.Policies, nil
 }
 
 func handleSubscribers(subscribers []eventingduckv1.SubscriberSpec, handle func(duckv1.Addressable)) {
@@ -279,4 +334,8 @@ func toKReference(imc *v1.InMemoryChannel) *duckv1.KReference {
 		Name:       imc.Name,
 		Address:    imc.Status.Address.Name,
 	}
+}
+
+func audience(imc *v1.InMemoryChannel) string {
+	return auth.GetAudience(v1.SchemeGroupVersion.WithKind("InMemoryChannel"), imc.ObjectMeta)
 }

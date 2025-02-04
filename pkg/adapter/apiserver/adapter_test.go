@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -34,6 +34,8 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubetesting "k8s.io/client-go/testing"
 	adaptertest "knative.dev/eventing/pkg/adapter/v2/test"
+	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
+	"knative.dev/eventing/pkg/eventfilter/subscriptionsapi"
 	rectesting "knative.dev/eventing/pkg/reconciler/testing"
 	"knative.dev/pkg/logging"
 	pkgtesting "knative.dev/pkg/reconciler/testing"
@@ -289,21 +291,27 @@ func validateNotSent(t *testing.T, ce *adaptertest.TestCloudEventsClient, want s
 
 func makeResourceAndTestingClient() (*resourceDelegate, *adaptertest.TestCloudEventsClient) {
 	ce := adaptertest.NewTestClient()
+	logger := zap.NewExample().Sugar()
+
 	return &resourceDelegate{
 		ce:                  ce,
 		source:              "unit-test",
 		apiServerSourceName: apiServerSourceNameTest,
-		logger:              zap.NewExample().Sugar(),
+		logger:              logger,
+		filter:              subscriptionsapi.NewAllFilter(subscriptionsapi.MaterializeFiltersList(logger.Desugar(), []eventingv1.SubscriptionsAPIFilter{})...),
 	}, ce
 }
 
 func makeRefAndTestingClient() (*resourceDelegate, *adaptertest.TestCloudEventsClient) {
 	ce := adaptertest.NewTestClient()
+	logger := zap.NewExample().Sugar()
+
 	return &resourceDelegate{
 		ce:                  ce,
 		source:              "unit-test",
 		apiServerSourceName: apiServerSourceNameTest,
 		logger:              zap.NewExample().Sugar(),
 		ref:                 true,
+		filter:              subscriptionsapi.NewAllFilter(subscriptionsapi.MaterializeFiltersList(logger.Desugar(), []eventingv1.SubscriptionsAPIFilter{})...),
 	}, ce
 }

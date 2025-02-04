@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@ limitations under the License.
 package resources
 
 import (
+	"context"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -47,12 +48,6 @@ func TestNewSubscription(t *testing.T) {
 		Kind:       "tc-kind",
 		APIVersion: "tc-apiVersion",
 	}
-	brokerRef := &corev1.ObjectReference{
-		Name:       "broker-name",
-		Namespace:  "t-namespace",
-		Kind:       "broker-kind",
-		APIVersion: "broker-apiVersion",
-	}
 	delivery := &eventingduckv1.DeliverySpec{
 		DeadLetterSink: &duckv1.Destination{
 			URI: apis.HTTP("dlc.example.com"),
@@ -61,7 +56,15 @@ func TestNewSubscription(t *testing.T) {
 	dest := &duckv1.Destination{
 		URI: apis.HTTP("example.com"),
 	}
-	got := NewSubscription(trigger, triggerChannelRef, brokerRef, dest, delivery)
+	reply := &duckv1.Destination{
+		Ref: &duckv1.KReference{
+			Name:       "broker-name",
+			Namespace:  "t-namespace",
+			Kind:       "broker-kind",
+			APIVersion: "broker-apiVersion",
+		},
+	}
+	got := NewSubscription(context.Background(), trigger, triggerChannelRef, dest, reply, delivery)
 	want := &messagingv1.Subscription{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "t-namespace",

@@ -5,7 +5,7 @@ Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+	http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,11 +26,12 @@ func GitHead() pkgupgrade.Operation {
 			"install_head",
 			"install_channel_crds",
 			"install_mt_broker",
+			"install_post_install_job",
 			"enable_sugar",
 		}
 		for _, shellfunc := range ops {
 			c.Log.Info("Running shell function: ", shellfunc)
-			err := callShellFunction(shellfunc)
+			err := callShellFunction(shellfunc, c.T)
 			if err != nil {
 				c.T.Error(err)
 				return
